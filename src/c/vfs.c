@@ -298,9 +298,9 @@ int vfs_seek(struct ARC_File *file, long offset, int whence) {
 
 	switch (whence) {
 		case SEEK_SET: {
-			if (offset < size) {
+			//if (offset < size) {
 				file->offset = offset;
-			}
+			//}
 
 			return 0;
 		}
