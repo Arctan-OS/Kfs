@@ -432,7 +432,7 @@ int vfs_traverse(char *filepath, struct arc_vfs_traverse_info *info, bool resolv
 			struct ARC_Resource *res = info->mount->resource;
 			struct ARC_SuperDriverDef *def = (struct ARC_SuperDriverDef *)res->driver->driver;
 
-			if (def->stat(res, phys_path, &next->stat) == 0) {
+			if (res->driver->stat(res, phys_path, &next->stat) == 0) {
 				// Stat succeeded, file exists on filesystem,
 				// set type
 				next->type = vfs_stat2type(next->stat.st_mode);
