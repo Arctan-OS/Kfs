@@ -300,23 +300,12 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 	return ret;
 }
 
-struct ARC_VFSNode *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNodeInfo *info) {
+char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNodeInfo *info, struct ARC_VFSNode **end) {
 	if (filepath == NULL || start == NULL || info == NULL) {
 		return NULL;
 	}
 
-	struct ARC_VFSNode *node = NULL;
-
-	char *upto = internal_vfs_traverse(filepath, start, &node, 1, callback_vfs_create_filepath, (void *)info);
-
-	if (*upto != 0) {
-		// Not what is expected, physical filesystem encountered error (failed to create file)
-		// or we ran out of memory
-	}
-
-	free(upto);
-
-	return node;
+	return internal_vfs_traverse(filepath, start, end, 1, callback_vfs_create_filepath, (void *)info);
 }
 
 static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, char *comp, size_t comp_len, char *mount_path, void *args) {
@@ -362,23 +351,12 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 	return ret;
 }
 
-struct ARC_VFSNode *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start) {
+char *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNode **end) {
 	if (filepath == NULL || start == NULL) {
 		return NULL;
 	}
 
-	struct ARC_VFSNode *node = NULL;
-
-	char *upto = internal_vfs_traverse(filepath, start, &node, 1, callback_vfs_load_filepath, NULL);
-
-	if (*upto != 0) {
-		// Not what is expected, physical filesystem encountered error (failed to create file)
-		// or we ran out of memory
-	}
-
-	free(upto);
-
-	return node;
+	return internal_vfs_traverse(filepath, start, end, 1, callback_vfs_load_filepath, NULL);
 }
 
 char *vfs_traverse_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNode **end, uint32_t flags) {

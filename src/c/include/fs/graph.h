@@ -47,8 +47,8 @@ struct ARC_VFSNodeInfo {
  *
  * */
 int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags);
-struct ARC_VFSNode *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNodeInfo *info);
-struct ARC_VFSNode *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start);
+char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNodeInfo *info, struct ARC_VFSNode **end);
+char *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNode **end);
 char *vfs_traverse_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNode **end, uint32_t flags);
 
 #endif
