@@ -65,7 +65,8 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 
 	// Mountpoint should already exist
 	struct ARC_VFSNode *node = NULL;
-	char *upto = vfs_traverse_filepath(mountpoint, vfs_get_starting_node(mountpoint), &node, 1);
+	void *ticket = NULL;
+	char *upto = vfs_traverse_filepath(mountpoint, vfs_get_starting_node(mountpoint), 1, &node, &ticket);
 
 	if (upto == NULL || *upto != 0 || node == NULL) {
 		return -2;
@@ -87,7 +88,7 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 	// NOTE: Shouldn't a reference be created to the resource?
 
 	// ref_count remains incremented to ensure it cannot be deleted
-	ticket_unlock(&node->branch_lock);
+	ticket_unlock(ticket);
 
 	return 0;
 }
@@ -119,19 +120,18 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	}
 
 	struct ARC_VFSNode *node = NULL;
+	void *ticket = NULL;
 	char *upto = NULL;
 
 	if (flags & O_CREAT) {
 		struct ARC_VFSNode *node_tmp = NULL;
-		char *tmp = vfs_load_filepath(path, vfs_get_starting_node(path), &node_tmp);
-		ticket_unlock(&node_tmp->branch_lock);
-
-		upto = vfs_create_filepath(tmp, node_tmp, NULL, &node);
+		char *tmp = vfs_load_filepath(path, vfs_get_starting_node(path), &node_tmp, &ticket);
+		upto = vfs_create_filepath(tmp, node_tmp, NULL, &node, &ticket);
 
 		free(tmp);
 		ARC_ATOMIC_DEC(node_tmp->ref_count);
 	} else {
-		upto = vfs_traverse_filepath(path, vfs_get_starting_node(path), &node, 1);
+		upto = vfs_traverse_filepath(path, vfs_get_starting_node(path), 1, &node, &ticket);
 	}
 
 	if (upto == NULL || *upto != 0) {
@@ -158,7 +158,7 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 
 	*ret = file;
 
-	ticket_unlock(&node->branch_lock);
+	ticket_unlock(ticket);
 	// Reference counter will be decremented by close function
 
 	return 0;

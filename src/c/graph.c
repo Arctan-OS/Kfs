@@ -157,8 +157,8 @@ static char *vfs_read_link(struct ARC_VFSNode *link) {
 	return path;
 }
 
-static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNode **end,
-				   uint32_t flags, struct ARC_VFSNode *(*callback)(struct ARC_VFSNode *, char *, size_t, char *, void *),
+static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNode **end, void **ticket,
+				   struct ARC_VFSNode *(*callback)(struct ARC_VFSNode *, char *, size_t, char *, void *),
 				   void *callback_args) {
 	// Flags:
 	//  Bit | Description
@@ -172,6 +172,7 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, st
 	}
 
 	struct ARC_VFSNode *node = start;
+	void *node_ticket = ticket == NULL ? NULL : *ticket;
 	struct ARC_VFSNode *next = NULL;
 
 	char *comp_base = filepath;
@@ -179,11 +180,13 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, st
 	char *mount_path = NULL;
 	size_t comp_len = (size_t)comp_end - (size_t)comp_base;
 
-	ticket_lock(&node->branch_lock);
-	ARC_ATOMIC_INC(node->ref_count);
+	if (node_ticket == NULL) {
+		ticket_lock(&node->branch_lock);
+		ARC_ATOMIC_INC(node->ref_count);
+	}
 
 	while (comp_end != NULL) {
-		ticket_lock_yield(&node->branch_lock);
+		ticket_lock_yield(node_ticket);
 
 		if (node->type == ARC_VFS_N_MOUNT) {
 			// NOTE: -1 is included to get the starting '/' character
@@ -220,11 +223,12 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, st
 	        next_iter:;
 
 		if (next != node) {
-			ticket_lock(&next->branch_lock);
+			void *tmp = ticket_lock(&next->branch_lock);
 			ARC_ATOMIC_INC(next->ref_count);
-			ticket_unlock(&node->branch_lock);
+			ticket_unlock(node_ticket);
 			ARC_ATOMIC_DEC(node->ref_count);
 			node = next;
+			node_ticket = tmp;
 		}
 
 		comp_base = comp_end;
@@ -249,12 +253,13 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, st
 		goto re_iter;
 	}
 
-	if (end != NULL) {
+	if (end != NULL && ticket != NULL) {
 		*end = node;
+		*ticket = node_ticket;
 	} else {
 		// Node is returned with the ref_count automatically
 		// incremented and the branch_lock held, so undo those
-		ticket_unlock(&node->branch_lock);
+		ticket_unlock(node_ticket);
 		ARC_ATOMIC_DEC(node->ref_count);
 	}
 
@@ -300,12 +305,12 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 	return ret;
 }
 
-char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNodeInfo *info, struct ARC_VFSNode **end) {
+char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNodeInfo *info, struct ARC_VFSNode **end, void **ticket) {
 	if (filepath == NULL || start == NULL || info == NULL) {
 		return NULL;
 	}
 
-	return internal_vfs_traverse(filepath, start, end, 1, callback_vfs_create_filepath, (void *)info);
+	return internal_vfs_traverse(filepath, start, 1, end, ticket, callback_vfs_create_filepath, (void *)info);
 }
 
 static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, char *comp, size_t comp_len, char *mount_path, void *args) {
@@ -351,14 +356,14 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 	return ret;
 }
 
-char *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNode **end) {
+char *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNode **end, void **ticket) {
 	if (filepath == NULL || start == NULL) {
 		return NULL;
 	}
 
-	return internal_vfs_traverse(filepath, start, end, 1, callback_vfs_load_filepath, NULL);
+	return internal_vfs_traverse(filepath, start, 1, end, ticket, callback_vfs_load_filepath, NULL);
 }
 
-char *vfs_traverse_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNode **end, uint32_t flags) {
-	return internal_vfs_traverse(filepath, start, end, flags, NULL, NULL);
+char *vfs_traverse_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNode **end, void **ticket) {
+	return internal_vfs_traverse(filepath, start, flags, end, ticket, NULL, NULL);
 }
