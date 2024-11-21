@@ -65,8 +65,7 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 
 	// Mountpoint should already exist
 	struct ARC_VFSNode *node = NULL;
-	void *ticket = NULL;
-	char *upto = vfs_traverse_filepath(mountpoint, vfs_get_starting_node(mountpoint), 1, &node, &ticket);
+	char *upto = vfs_traverse_filepath(mountpoint, vfs_get_starting_node(mountpoint), 1, &node);
 
 	if (upto == NULL || *upto != 0 || node == NULL) {
 		return -2;
@@ -88,7 +87,6 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 	// NOTE: Shouldn't a reference be created to the resource?
 
 	// ref_count remains incremented to ensure it cannot be deleted
-	ticket_unlock(ticket);
 
 	return 0;
 }
@@ -120,18 +118,17 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	}
 
 	struct ARC_VFSNode *node = NULL;
-	void *ticket = NULL;
 	char *upto = NULL;
 
 	if (flags & O_CREAT) {
 		struct ARC_VFSNode *node_tmp = NULL;
-		char *tmp = vfs_load_filepath(path, vfs_get_starting_node(path), &node_tmp, &ticket);
-		upto = vfs_create_filepath(tmp, node_tmp, NULL, &node, &ticket);
+		char *tmp = vfs_load_filepath(path, vfs_get_starting_node(path), &node_tmp);
+		upto = vfs_create_filepath(tmp, node_tmp, NULL, &node);
 
 		free(tmp);
 		ARC_ATOMIC_DEC(node_tmp->ref_count);
 	} else {
-		upto = vfs_traverse_filepath(path, vfs_get_starting_node(path), 1, &node, &ticket);
+		upto = vfs_traverse_filepath(path, vfs_get_starting_node(path), 1, &node);
 	}
 
 	if (upto == NULL || *upto != 0) {
@@ -158,7 +155,6 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 
 	*ret = file;
 
-	ticket_unlock(ticket);
 	// Reference counter will be decremented by close function
 
 	return 0;
@@ -249,6 +245,8 @@ int vfs_close(struct ARC_File *file) {
 
 	ARC_ATOMIC_DEC(node->ref_count);
 
+	void *ticket = ticket_lock(&node->parent->branch_lock);
+
 	if (node->ref_count > 0) {
 		// TODO: Delete the file descriptor
 		return 0;
@@ -264,7 +262,14 @@ int vfs_stat(char *filepath, struct stat *stat) {
 		return -1;
 	}
 
-	return 0;
+	struct ARC_VFSNode *node = NULL;
+	char *upto = vfs_load_filepath(filepath, vfs_get_starting_node(filepath), &node, NULL);
+
+	if (upto == NULL || *upto != 0) {
+		return -2;
+	}
+
+	return node->resource->driver->stat(node->resource, NULL, stat);
 }
 
 int vfs_create(char *path, uint32_t mode, int type, void *arg) {
