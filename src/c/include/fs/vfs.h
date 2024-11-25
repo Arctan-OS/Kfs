@@ -46,6 +46,7 @@
 #include <lib/resource.h>
 #include <lib/atomics.h>
 #include <stdbool.h>
+#include <fs/graph.h>
 #include <abi-bits/seek-whence.h>
 
 /**
@@ -180,7 +181,7 @@ int vfs_close(struct ARC_File *file);
  * */
 int vfs_stat(char *filepath, struct stat *stat);
 
-int vfs_create(char *path, uint32_t mode, int type, void *arg);
+int vfs_create(char *path, struct ARC_VFSNodeInfo *info);
 int vfs_remove(char *filepath, bool recurse);
 int vfs_link(char *a, char *b, uint32_t mode);
 int vfs_rename(char *a, char *b);

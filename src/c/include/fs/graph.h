@@ -33,9 +33,12 @@
 #include <fs/vfs.h>
 
 struct ARC_VFSNodeInfo {
+	struct ARC_Resource *resource_overwrite;
 	void *driver_arg;
 	uint64_t driver_index;
 	int driver_group;
+	uint32_t flags; // Bit | Description
+			// 0   | 1: Infer driver definition
 	uint32_t mode;
 	int type;
 	int code; // Return code of function that used info struct
@@ -44,7 +47,10 @@ struct ARC_VFSNodeInfo {
 /**
  * Deletes a
  *
- *
+ * Flags:
+ *  Bit | Description
+ *  0   | Recursive delete
+ *  1   | Physical delete
  * */
 int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags);
 char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNodeInfo *info, struct ARC_VFSNode **end);

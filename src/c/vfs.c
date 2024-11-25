@@ -27,13 +27,21 @@
 #include <fs/vfs.h>
 #include <fs/graph.h>
 #include <abi-bits/seek-whence.h>
+#include <abi-bits/fcntl.h>
 #include <global.h>
 #include <mm/allocator.h>
 #include <lib/util.h>
 #include <lib/resource.h>
+#include <lib/ringbuffer.h>
+
+#define NODE_CACHE_SIZE 1024
 
 static struct ARC_VFSNode vfs_root = { 0 };
 char *vfs_root_name = "";
+
+static struct ARC_VFSNode *vfs_node_cache[1024] = { 0 };
+static uint64_t vfs_node_cache_idx = 0;
+static ARC_GenericSpinlock vfs_node_cache_lock = 0;
 
 static struct ARC_VFSNode *vfs_get_starting_node(char *filepath) {
 	if (*filepath == '/') {
@@ -50,6 +58,7 @@ int init_vfs() {
 	vfs_root.name = vfs_root_name;
 	init_static_ticket_lock(&vfs_root.branch_lock);
 	init_static_mutex(&vfs_root.property_lock);
+	init_static_spinlock(&vfs_node_cache_lock);
 
 	// NOTE: This is here such that it is impossible to
 	//       delete the root node
@@ -67,14 +76,19 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 	struct ARC_VFSNode *node = NULL;
 	char *upto = vfs_traverse_filepath(mountpoint, vfs_get_starting_node(mountpoint), 1, &node);
 
-	if (upto == NULL || *upto != 0 || node == NULL) {
+	if (upto == NULL || node == NULL) {
 		return -2;
+	}
+
+	if (*upto != 0) {
+		free(upto);
+		return -3;
 	}
 
 	free(upto);
 
 	if (node->type != ARC_VFS_N_DIR || node->children != NULL) {
-		return -3;
+		return -4;
 	}
 
 	mutex_lock(&node->property_lock);
@@ -118,21 +132,25 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	}
 
 	struct ARC_VFSNode *node = NULL;
-	char *upto = NULL;
+	char *upto = vfs_load_filepath(path, vfs_get_starting_node(path), &node);
 
-	if (flags & O_CREAT) {
-		struct ARC_VFSNode *node_tmp = NULL;
-		char *tmp = vfs_load_filepath(path, vfs_get_starting_node(path), &node_tmp);
-		upto = vfs_create_filepath(tmp, node_tmp, NULL, &node);
-
-		free(tmp);
-		ARC_ATOMIC_DEC(node_tmp->ref_count);
-	} else {
-		upto = vfs_traverse_filepath(path, vfs_get_starting_node(path), 1, &node);
+	if (upto == NULL) {
+		return -2;
 	}
 
-	if (upto == NULL || *upto != 0) {
-		return -2;
+	if (flags & O_CREAT) {
+		char *c_upto = vfs_create_filepath(upto, node, NULL, &node);
+		free(upto);
+		upto = c_upto;
+	}
+
+	if (upto == NULL) {
+		return -3;
+	}
+
+	if (*upto != 0) {
+		free(upto);
+		return -4;
 	}
 
 	free(upto);
@@ -143,10 +161,14 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 		ticket_unlock(&node->branch_lock);
 		ARC_ATOMIC_DEC(node->ref_count);
 
-		return -3;
+		return -5;
 	}
 
 	memset(file, 0, sizeof(*file));
+
+	if (node->link != NULL) {
+		ARC_ATOMIC_INC(node->link->ref_count);
+	}
 
 	file->mode = mode;
 	file->flags = flags;
@@ -165,19 +187,32 @@ int vfs_read(void *buffer, size_t size, size_t count, struct ARC_File *file) {
 		return 0;
 	}
 
+	ARC_ATOMIC_INC(file->ref_count);
+
 	struct ARC_VFSNode *node = file->node;
 
 	if (node == NULL) {
+		ARC_ATOMIC_DEC(file->ref_count);
 		return 0;
+	}
+
+	struct ARC_File internal_desc = { 0 };
+	memcpy(&internal_desc, file, sizeof(internal_desc));
+
+	if (node->link != NULL) {
+		node = node->link;
+		internal_desc.node = node;
 	}
 
 	struct ARC_Resource *res = node->resource;
 
-	if (node->type == ARC_VFS_N_LINK && node->link != NULL) {
-		res = node->link->resource;
-	}
+	int ret = res->driver->read(buffer, size, count, &internal_desc, res);
 
-	return res->driver->read(buffer, size, count, file, res);
+	file->offset += ret;
+
+	ARC_ATOMIC_DEC(file->ref_count);
+
+	return ret;
 }
 
 int vfs_write(void *buffer, size_t size, size_t count, struct ARC_File *file) {
@@ -185,10 +220,21 @@ int vfs_write(void *buffer, size_t size, size_t count, struct ARC_File *file) {
 		return 0;
 	}
 
+	ARC_ATOMIC_INC(file->ref_count);
+
 	struct ARC_VFSNode *node = file->node;
 
 	if (node == NULL) {
+		ARC_ATOMIC_DEC(file->ref_count);
 		return 0;
+	}
+
+	struct ARC_File internal_desc = { 0 };
+	memcpy(&internal_desc, file, sizeof(internal_desc));
+
+	if (node->link != NULL) {
+		node = node->link;
+		internal_desc.node = node;
 	}
 
 	struct ARC_Resource *res = node->resource;
@@ -197,7 +243,13 @@ int vfs_write(void *buffer, size_t size, size_t count, struct ARC_File *file) {
 		res = node->link->resource;
 	}
 
-	return res->driver->write(buffer, size, count, file, res);
+	int ret = res->driver->write(buffer, size, count, &internal_desc, res);
+
+	file->offset += ret;
+
+	ARC_ATOMIC_DEC(file->ref_count);
+
+	return ret;
 }
 
 int vfs_seek(struct ARC_File *file, long offset, int whence) {
@@ -205,11 +257,22 @@ int vfs_seek(struct ARC_File *file, long offset, int whence) {
 		return -1;
 	}
 
+	ARC_ATOMIC_INC(file->ref_count);
+
+	if (file->node == NULL) {
+		ARC_ATOMIC_DEC(file->ref_count);
+		return -2;
+	}
+
 	long size = file->node->stat.st_size;
+
+	if (file->node->link != NULL) {
+		size = file->node->link->stat.st_size;
+	}
 
 	switch (whence) {
 		case SEEK_SET: {
-			if (0 < offset < size) {
+			if (0 <= offset && offset < size) {
 				file->offset = offset;
 			}
 
@@ -217,7 +280,7 @@ int vfs_seek(struct ARC_File *file, long offset, int whence) {
 		}
 
 		case SEEK_CUR: {
-			if (0 < file->offset + offset < size) {
+			if (0 <= file->offset + offset && file->offset + offset < size) {
 				file->offset += offset;
 			}
 
@@ -225,13 +288,15 @@ int vfs_seek(struct ARC_File *file, long offset, int whence) {
 		}
 
 		case SEEK_END: {
-			if (0 < size - offset - 1 < size) {
+			if (0 <= size - offset - 1 && size - offset - 1 < size) {
 				file->offset = size - offset - 1;
 			}
 
 			break;
 		}
 	}
+
+	ARC_ATOMIC_DEC(file->ref_count);
 
 	return 0;
 }
@@ -241,18 +306,35 @@ int vfs_close(struct ARC_File *file) {
 		return -1;
 	}
 
+	if (file->ref_count > 0) {
+		return -2;
+	}
+
 	struct ARC_VFSNode *node = file->node;
 
 	ARC_ATOMIC_DEC(node->ref_count);
 
-	void *ticket = ticket_lock(&node->parent->branch_lock);
+	if (node->link != NULL) {
+		ARC_ATOMIC_DEC(node->link->ref_count);
+	}
 
 	if (node->ref_count > 0) {
-		// TODO: Delete the file descriptor
+		unrefrence_resource(file->reference);
+		ARC_ATOMIC_DEC(node->ref_count);
+		free(file);
+
 		return 0;
 	}
 
-	// TODO: Delete descriptor and file
+	spinlock_lock(&vfs_node_cache_lock);
+	uint64_t idx = ARC_ATOMIC_INC(vfs_node_cache_idx);
+	vfs_node_cache_idx %= NODE_CACHE_SIZE;
+	spinlock_unlock(&vfs_node_cache_lock);
+
+	idx--;
+
+	vfs_delete_node(vfs_node_cache[idx], 1);
+	vfs_node_cache[idx] = node;
 
 	return 0;
 }
@@ -263,18 +345,34 @@ int vfs_stat(char *filepath, struct stat *stat) {
 	}
 
 	struct ARC_VFSNode *node = NULL;
-	char *upto = vfs_load_filepath(filepath, vfs_get_starting_node(filepath), &node, NULL);
+	char *upto = vfs_load_filepath(filepath, vfs_get_starting_node(filepath), &node);
 
-	if (upto == NULL || *upto != 0) {
+	if (upto == NULL) {
 		return -2;
+	}
+
+	if (*upto != 0) {
+		free(upto);
+		return -3;
 	}
 
 	return node->resource->driver->stat(node->resource, NULL, stat);
 }
 
-int vfs_create(char *path, uint32_t mode, int type, void *arg) {
-	if (path == NULL || mode == 0 || type == ARC_VFS_NULL) {
+int vfs_create(char *path, struct ARC_VFSNodeInfo *info) {
+	if (path == NULL || info == NULL) {
 		return -1;
+	}
+
+	char *upto = vfs_create_filepath(path, vfs_get_starting_node(path), info, NULL);
+
+	if (upto == NULL) {
+		return -2;
+	}
+
+	if (*upto != 0) {
+		free(upto);
+		return -3;
 	}
 
 	return 0;
@@ -285,6 +383,20 @@ int vfs_remove(char *filepath, bool recurse) {
 		return -1;
 	}
 
+	struct ARC_VFSNode *node = NULL;
+	char *upto = vfs_traverse_filepath(filepath, vfs_get_starting_node(filepath), 0, &node);
+
+	if (upto == NULL) {
+		return -2;
+	}
+
+	if (*upto != 0) {
+		free(upto);
+		return -3;
+	}
+
+	vfs_delete_node(node, recurse | (1 << 1));
+
 	return 0;
 }
 
@@ -292,6 +404,51 @@ int vfs_link(char *a, char *b, uint32_t mode) {
 	if (a == NULL || b == NULL || mode == 0) {
 		return -1;
 	}
+
+	struct ARC_VFSNode *node_a = NULL;
+	char *upto = vfs_load_filepath(a, vfs_get_starting_node(a), &node_a);
+
+	if (upto == NULL) {
+		return -2;
+	}
+
+	if (*upto != 0) {
+		free(upto);
+		return -3;
+	}
+
+	free(upto);
+
+	struct ARC_VFSNode *node_b = NULL;
+	upto = vfs_load_filepath(b, vfs_get_starting_node(b), &node_b);
+
+	if (upto == NULL) {
+		return -4;
+	}
+
+	struct ARC_VFSNodeInfo info = {
+	        .type = ARC_VFS_N_LINK,
+		.mode = node_a->stat.st_mode,
+		.driver_group = -1,
+        };
+
+	char *c_upto = vfs_create_filepath(upto, node_b, &info, &node_b);
+	free(upto);
+
+	if (c_upto == NULL) {
+		return -5;
+	}
+
+	if (*c_upto != 0) {
+		free(c_upto);
+		return -6;
+	}
+
+	void *ticket = ticket_lock(&node_b->branch_lock);
+	ticket_lock_yield(ticket);
+	node_b->link = node_a;
+	// TODO: Write relative path from node B to node A into node B
+	ticket_unlock(ticket);
 
 	return 0;
 }
@@ -304,10 +461,54 @@ int vfs_rename(char *a, char *b) {
 	return 0;
 }
 
+static int internal_vfs_list(struct ARC_VFSNode *node, int level, int org) {
+	if (node == NULL) {
+		return -1;
+	}
+
+	struct ARC_VFSNode *children = node->children;
+
+	if (children == NULL) {
+		return 0;
+	}
+
+	const char *names[] = {
+	        [ARC_VFS_N_DEV] = "Device",
+	        [ARC_VFS_N_FILE] = "File",
+	        [ARC_VFS_N_DIR] = "Directory",
+	        [ARC_VFS_N_BUFF] = "Buffer",
+	        [ARC_VFS_N_FIFO] = "FIFO",
+	        [ARC_VFS_N_MOUNT] = "Mount",
+	        [ARC_VFS_N_ROOT] = "Root",
+	        [ARC_VFS_N_LINK] = "Link",
+        };
+
+	while (children != NULL) {
+		for (int i = 0; i < org - level; i++) {
+			printf("\t");
+		}
+		printf("%s (%s, %p)\n", children->name, names[children->type], children->resource);
+
+		internal_vfs_list(children, level - 1, org);
+		children = children->next;
+	}
+
+	return 0;
+}
+
 int vfs_list(char *path, int recurse) {
 	if (path == NULL) {
 		return -1;
 	}
+
+	struct ARC_VFSNode *node = NULL;
+	char *upto = vfs_traverse_filepath(path, vfs_get_starting_node(path), 1, &node);
+
+	if (upto == NULL || *upto != 0) {
+		return -2;
+	}
+
+	internal_vfs_list(node, recurse, recurse);
 
 	return 0;
 }
