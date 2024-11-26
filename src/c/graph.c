@@ -118,6 +118,10 @@ int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
 		return -2;
 	}
 
+	// Branch lock
+	// Change prev->next to cur->next (more likely)
+	// Change next->prev to prev (less likely)
+
 	return 0;
 }
 
@@ -152,9 +156,7 @@ struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size
 
 	node->name = strndup(name, name_len);
 
-	void *ticket = ticket_lock(&parent->branch_lock);
-	ticket_lock_yield(ticket);
-
+	// NOTE: It is expected that the caller has locked the parent node's branch_lock
 	node->parent = parent;
 	struct ARC_VFSNode *next = parent->children;
 	node->next = next;
@@ -162,8 +164,6 @@ struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size
 		next->next->prev = node;
 	}
 	parent->children = node;
-
-	ticket_unlock(ticket);
 
 	if (node->resource != NULL) {
 		node->resource->driver->stat(node->resource, NULL, &node->stat);
@@ -347,6 +347,23 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 		mount = node;
 	}
 
+	void *ticket = ticket_lock(&node->branch_lock);
+	ticket_lock_yield(ticket);
+
+	struct ARC_VFSNode *children = node->children;
+	while (children != NULL) {
+		if (strncmp(comp, children->name, max(strlen(children->name), comp_len)) == 0) {
+			break;
+		}
+
+		children = children->next;
+	}
+
+	if (children != NULL) {
+		ticket_unlock(ticket);
+		return children;
+	}
+
 	if (comp[comp_len] == 0) {
 		int phys_ret = 0;
 
@@ -366,6 +383,8 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 		struct ARC_VFSNodeInfo local_info = { .type = ARC_VFS_N_DIR, .driver_group = -1 };
 		ret = vfs_create_node(node, comp, comp_len, &local_info);
 	}
+
+	ticket_unlock(ticket);
 
 	return ret;
 }
@@ -402,6 +421,24 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 		return NULL;
 	}
 
+	void *ticket = ticket_lock(&node->branch_lock);
+	ticket_lock_yield(ticket);
+
+	struct ARC_VFSNode *children = node->children;
+	while (children != NULL) {
+		if (strncmp(comp, children->name, max(strlen(children->name), comp_len)) == 0) {
+			break;
+		}
+
+		children = children->next;
+	}
+
+	if (children != NULL) {
+		ticket_unlock(ticket);
+		return children;
+	}
+
+
 	// NOTE: This would stat the file each time that this callback
 	//       is called. This is not ideal as it limits the speed, perhaps
 	//       implement a way of caching the result of this stat
@@ -413,6 +450,7 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 		ARC_DEBUG(ERR, "Path %s does not exist on the physical filesystem\n", mount_path);
 		return NULL;
 	}
+
 
 	// The node does exist, proceed with creation
 	if (comp[comp_len] == 0) {
@@ -428,6 +466,8 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 		struct ARC_VFSNodeInfo info = { .type = ARC_VFS_N_DIR, .driver_group = -1 };
 		ret = vfs_create_node(node, comp, comp_len, &info);
 	}
+
+	ticket_unlock(ticket);
 
 	return ret;
 }

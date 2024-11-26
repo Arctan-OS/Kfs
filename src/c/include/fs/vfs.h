@@ -64,6 +64,7 @@ struct ARC_VFSNode {
 	/// Pointer to the next element in the current linked list.
 	struct ARC_VFSNode *next;
 	/// Pointer to the previous element in the current linked list.
+	// TODO: There is no real need for this, can probably just be removed
 	struct ARC_VFSNode *prev;
 	/// Lock on branching of this node (link, parent, children, next, prev, name)
 	struct ARC_TicketLock branch_lock;
