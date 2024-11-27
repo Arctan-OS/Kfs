@@ -119,7 +119,10 @@ int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
 	}
 
 	// Branch lock
-	// Change prev->next to cur->next (more likely)
+	// If node->type == LINK:
+	//  Unincrement ref_count of resolve
+	//
+	// Change prev->next to node->next (more likely)
 	// Change next->prev to prev (less likely)
 
 	return 0;
@@ -196,7 +199,12 @@ static char *vfs_path_get_next_component(char *path) {
 
 static char *vfs_read_link(struct ARC_VFSNode *link) {
 	if (link == NULL || link->type != ARC_VFS_N_LINK) {
-		ARC_DEBUG(ERR, "Cannot resolve link, improper parameters (%p %d)\n", link, link->type);
+		ARC_DEBUG(ERR, "Cannot resolve link, improper parameters (%p, %d)\n", link, link == NULL ? ARC_VFS_NULL : link->type);
+		return NULL;
+	}
+
+	if (link->link != NULL) {
+		// No need to resolve it, as it is already resolved
 		return NULL;
 	}
 
@@ -219,6 +227,11 @@ static char *vfs_read_link(struct ARC_VFSNode *link) {
 		return NULL;
 	}
 
+	if (*path == 0) {
+		free(path);
+		return NULL;
+	}
+
 	return path;
 }
 
@@ -229,6 +242,7 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 	//  Bit | Description
 	//  0   | 1: Resolve links
 	size_t lnk_counter = 0;
+	struct ARC_VFSNode *org_node = NULL;
 
         re_iter:;
 
@@ -276,6 +290,13 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 
 		if (next == NULL) {
 			ARC_DEBUG(ERR, "Quiting traversal of %s, no next node found\n", filepath);
+
+			if (lnk_counter > 0) {
+				ARC_DEBUG(ERR, "\tBroken link!\n");
+				ARC_ATOMIC_DEC(node->ref_count);
+				node = NULL;
+			}
+
 			break;
 		}
 
@@ -305,10 +326,12 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 
 		if (lnk_counter > 0) {
 			free(filepath);
+		} else {
+			org_node = node;
 		}
 		lnk_counter++;
 
-		start = node;
+		start = node->parent;
 
 		goto re_iter;
 	}
@@ -317,6 +340,11 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 
 	if (end != NULL) {
 		*end = node;
+
+		if (org_node != NULL) {
+			org_node->link = node;
+			*end = org_node;
+		}
 	} else {
 		ARC_ATOMIC_DEC(node->ref_count);
 		goto create_ret_buff;
@@ -437,7 +465,6 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 		ticket_unlock(ticket);
 		return children;
 	}
-
 
 	// NOTE: This would stat the file each time that this callback
 	//       is called. This is not ideal as it limits the speed, perhaps

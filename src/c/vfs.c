@@ -139,6 +139,7 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	}
 
 	if (flags & O_CREAT) {
+		// TODO: Fix
 		char *c_upto = vfs_create_filepath(upto, node, NULL, &node);
 		free(upto);
 		upto = c_upto;
@@ -165,10 +166,6 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	}
 
 	memset(file, 0, sizeof(*file));
-
-	if (node->link != NULL) {
-		ARC_ATOMIC_INC(node->link->ref_count);
-	}
 
 	file->mode = mode;
 	file->flags = flags;
@@ -204,7 +201,17 @@ int vfs_read(void *buffer, size_t size, size_t count, struct ARC_File *file) {
 		internal_desc.node = node;
 	}
 
+	if (node->type == ARC_VFS_N_LINK) {
+		ARC_ATOMIC_DEC(file->ref_count);
+		return 0;
+	}
+
 	struct ARC_Resource *res = node->resource;
+
+	if (res == NULL) {
+		ARC_ATOMIC_DEC(file->ref_count);
+		return 0;
+	}
 
 	int ret = res->driver->read(buffer, size, count, &internal_desc, res);
 
@@ -237,10 +244,16 @@ int vfs_write(void *buffer, size_t size, size_t count, struct ARC_File *file) {
 		internal_desc.node = node;
 	}
 
+	if (node->type == ARC_VFS_N_LINK) {
+		ARC_ATOMIC_DEC(file->ref_count);
+		return 0;
+	}
+
 	struct ARC_Resource *res = node->resource;
 
-	if (node->type == ARC_VFS_N_LINK && node->link != NULL) {
-		res = node->link->resource;
+	if (res == NULL) {
+		ARC_ATOMIC_DEC(file->ref_count);
+		return 0;
 	}
 
 	int ret = res->driver->write(buffer, size, count, &internal_desc, res);
@@ -313,10 +326,6 @@ int vfs_close(struct ARC_File *file) {
 	struct ARC_VFSNode *node = file->node;
 
 	ARC_ATOMIC_DEC(node->ref_count);
-
-	if (node->link != NULL) {
-		ARC_ATOMIC_DEC(node->link->ref_count);
-	}
 
 	if (node->ref_count > 0) {
 		unrefrence_resource(file->reference);
@@ -487,7 +496,15 @@ static int internal_vfs_list(struct ARC_VFSNode *node, int level, int org) {
 		for (int i = 0; i < org - level; i++) {
 			printf("\t");
 		}
-		printf("%s (%s, %p)\n", children->name, names[children->type], children->resource);
+		if (children->type != ARC_VFS_N_LINK) {
+			printf("%s (%s, %o, 0x%x B)\n", children->name, names[children->type], children->stat.st_mode, children->stat.st_size);
+		} else {
+			if (children->link == NULL) {
+				printf("%s (Broken Link, %o, 0x%x B) -/> NULL\n", children->name, children->stat.st_mode, children->stat.st_size);
+			} else {
+				printf("%s (Link, %o, 0x%x B) -> %s\n", children->name, children->stat.st_mode, children->stat.st_size, children->link->name);
+			}
+		}
 
 		internal_vfs_list(children, level - 1, org);
 		children = children->next;
