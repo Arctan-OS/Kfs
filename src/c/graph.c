@@ -163,9 +163,11 @@ struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size
 	node->parent = parent;
 	struct ARC_VFSNode *next = parent->children;
 	node->next = next;
-	if (next != NULL && next->next != NULL) {
-		next->next->prev = node;
+
+	if (next != NULL) {
+		next->prev = node;
 	}
+
 	parent->children = node;
 
 	if (node->resource != NULL) {
@@ -175,8 +177,8 @@ struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size
 	return node;
 }
 
-static char *vfs_path_get_next_component(char *path) {
-	if (path == NULL)  {
+static char *vfs_path_get_next_component(char *path, uint32_t *is_last) {
+	if (path == NULL || is_last == NULL)  {
 		return NULL;
 	}
 
@@ -192,6 +194,10 @@ static char *vfs_path_get_next_component(char *path) {
 
 	while (*ret != 0 && *ret != '/') {
 		ret++;
+	}
+
+	if (*ret == 0) {
+		*is_last = 1;
 	}
 
 	return ret;
@@ -241,6 +247,7 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 	// Flags:
 	//  Bit | Description
 	//  0   | 1: Resolve links
+	//  1   | 1: Ignore last component
 	size_t lnk_counter = 0;
 	struct ARC_VFSNode *org_node = NULL;
 
@@ -253,14 +260,19 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 	struct ARC_VFSNode *node = start;
 	struct ARC_VFSNode *next = NULL;
 
+	uint32_t is_last = 0;
 	char *comp_base = *filepath == '/' ? filepath + 1 : filepath;
-	char *comp_end = vfs_path_get_next_component(comp_base);
+	char *comp_end = vfs_path_get_next_component(comp_base, &is_last);
 	char *mount_path = NULL;
 	size_t comp_len = (size_t)comp_end - (size_t)comp_base;
 
 	ARC_ATOMIC_INC(node->ref_count);
 
 	while (comp_end != NULL) {
+		if (MASKED_READ(flags, 1, 1) == 1 && is_last == 1) {
+			break;
+		}
+
 		if (node->type == ARC_VFS_N_MOUNT) {
 			mount_path = comp_base;
 		}
@@ -309,7 +321,7 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 		}
 
 		comp_base = *comp_end == '/' ? comp_end + 1 : comp_end; // Skip over /
-		comp_end = vfs_path_get_next_component(comp_base);
+		comp_end = vfs_path_get_next_component(comp_base, &is_last);
 		comp_len = (size_t)comp_end - (size_t)comp_base;
 
 		next = NULL;
@@ -417,7 +429,7 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 	return ret;
 }
 
-char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNodeInfo *info, struct ARC_VFSNode **end) {
+char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNodeInfo *info, struct ARC_VFSNode **end) {
 	if (filepath == NULL || start == NULL || info == NULL) {
 		ARC_DEBUG(ERR, "Cannot create %s, imporper parameters (%p %p %p)\n", filepath, filepath, start ,info);
 		return NULL;
@@ -425,7 +437,7 @@ char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_
 
 	ARC_DEBUG(INFO, "Creating %s\n", filepath);
 
-	return internal_vfs_traverse(filepath, start, 1, end, callback_vfs_create_filepath, (void *)info);
+	return internal_vfs_traverse(filepath, start, flags | 1, end, callback_vfs_create_filepath, (void *)info);
 }
 
 static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, char *comp, size_t comp_len, char *mount_path, void *args) {
@@ -499,7 +511,7 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 	return ret;
 }
 
-char *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VFSNode **end) {
+char *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNode **end) {
 	if (filepath == NULL || start == NULL) {
 		ARC_DEBUG(ERR, "Cannot create %s, improper parameters (%p %p)", filepath, start);
 		return NULL;
@@ -507,7 +519,7 @@ char *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start, struct ARC_VF
 
 	ARC_DEBUG(INFO, "Loading %s\n", filepath);
 
-	return internal_vfs_traverse(filepath, start, 1, end, callback_vfs_load_filepath, NULL);
+	return internal_vfs_traverse(filepath, start, flags | 1, end, callback_vfs_load_filepath, NULL);
 }
 
 char *vfs_traverse_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNode **end) {

@@ -184,11 +184,9 @@ int vfs_stat(char *filepath, struct stat *stat);
 
 int vfs_create(char *path, struct ARC_VFSNodeInfo *info);
 int vfs_remove(char *filepath, bool recurse);
-int vfs_link(char *a, char *b, uint32_t mode);
+int vfs_link(char *a, char *b, int32_t mode);
 int vfs_rename(char *a, char *b);
 int vfs_list(char *path, int recurse);
-
-struct ARC_VFSNode *vfs_create_rel(char *relative_path, struct ARC_VFSNode *start, uint32_t mode, int type, void *arg);
 
 /**
  * Get the relative path from B to A.

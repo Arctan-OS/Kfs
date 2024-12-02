@@ -53,6 +53,17 @@ static struct ARC_VFSNode *vfs_get_starting_node(char *filepath) {
 	return NULL;
 }
 
+// NOTE: Expects a and b ref_count to be incremented by caller
+static char *vfs_internal_get_relative_path(struct ARC_VFSNode *a, struct ARC_VFSNode *b) {
+	if (a == NULL || b = NULL) {
+		return NULL;
+	}
+
+
+
+	return NULL;
+}
+
 int init_vfs() {
 	vfs_root.type = ARC_VFS_N_DIR;
 	vfs_root.name = vfs_root_name;
@@ -132,15 +143,15 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	}
 
 	struct ARC_VFSNode *node = NULL;
-	char *upto = vfs_load_filepath(path, vfs_get_starting_node(path), &node);
+	char *upto = vfs_load_filepath(path, vfs_get_starting_node(path), 1, &node);
 
 	if (upto == NULL) {
 		return -2;
 	}
 
 	if (flags & O_CREAT) {
-		// TODO: Fix
-		char *c_upto = vfs_create_filepath(upto, node, NULL, &node);
+		// TODO: Fix, node info should NOT be NULL
+		char *c_upto = vfs_create_filepath(upto, node, 1, NULL, &node);
 		free(upto);
 		upto = c_upto;
 	}
@@ -354,18 +365,23 @@ int vfs_stat(char *filepath, struct stat *stat) {
 	}
 
 	struct ARC_VFSNode *node = NULL;
-	char *upto = vfs_load_filepath(filepath, vfs_get_starting_node(filepath), &node);
+	char *upto = vfs_load_filepath(filepath, vfs_get_starting_node(filepath), 1, &node);
 
 	if (upto == NULL) {
 		return -2;
 	}
 
 	if (*upto != 0) {
+		ARC_ATOMIC_DEC(node->ref_count);
 		free(upto);
 		return -3;
 	}
 
-	return node->resource->driver->stat(node->resource, NULL, stat);
+	int ret = node->resource->driver->stat(node->resource, NULL, stat);
+
+	ARC_ATOMIC_DEC(node->ref_count);
+
+	return ret;
 }
 
 int vfs_create(char *path, struct ARC_VFSNodeInfo *info) {
@@ -373,7 +389,7 @@ int vfs_create(char *path, struct ARC_VFSNodeInfo *info) {
 		return -1;
 	}
 
-	char *upto = vfs_create_filepath(path, vfs_get_starting_node(path), info, NULL);
+	char *upto = vfs_create_filepath(path, vfs_get_starting_node(path), 1, info, NULL);
 
 	if (upto == NULL) {
 		return -2;
@@ -399,6 +415,8 @@ int vfs_remove(char *filepath, bool recurse) {
 		return -2;
 	}
 
+	ARC_ATOMIC_DEC(node->ref_count);
+
 	if (*upto != 0) {
 		free(upto);
 		return -3;
@@ -409,19 +427,24 @@ int vfs_remove(char *filepath, bool recurse) {
 	return 0;
 }
 
-int vfs_link(char *a, char *b, uint32_t mode) {
+int vfs_link(char *a, char *b, int32_t mode) {
 	if (a == NULL || b == NULL || mode == 0) {
+		// Invalid parameters
 		return -1;
 	}
 
 	struct ARC_VFSNode *node_a = NULL;
-	char *upto = vfs_load_filepath(a, vfs_get_starting_node(a), &node_a);
+	char *upto = vfs_load_filepath(a, vfs_get_starting_node(a), 1, &node_a);
 
 	if (upto == NULL) {
+		// Something has gone very wrong
 		return -2;
 	}
 
 	if (*upto != 0) {
+		// The path to link to does not exist
+		ARC_ATOMIC_DEC(node_a->ref_count);
+
 		free(upto);
 		return -3;
 	}
@@ -429,26 +452,40 @@ int vfs_link(char *a, char *b, uint32_t mode) {
 	free(upto);
 
 	struct ARC_VFSNode *node_b = NULL;
-	upto = vfs_load_filepath(b, vfs_get_starting_node(b), &node_b);
+	upto = vfs_load_filepath(b, vfs_get_starting_node(b), 1, &node_b);
 
 	if (upto == NULL) {
+		// Something has gone very wrong
 		return -4;
+	}
+
+	if (*upto == 0) {
+		// The path that is going to be linked to already exists, do not
+		// overwrite it
+		ARC_ATOMIC_DEC(node_a->ref_count);
+		ARC_ATOMIC_DEC(node_b->ref_count);
+
+		return -5;
 	}
 
 	struct ARC_VFSNodeInfo info = {
 	        .type = ARC_VFS_N_LINK,
-		.mode = node_a->stat.st_mode,
+		.mode = mode == -1 ? MASKED_READ(node_a->stat.st_mode, 0, 0x1FF) : MASKED_READ(mode, 0, 0x1FF),
 		.driver_group = -1,
         };
 
-	char *c_upto = vfs_create_filepath(upto, node_b, &info, &node_b);
+	char *c_upto = vfs_create_filepath(upto, node_b, 1, &info, &node_b);
 	free(upto);
 
 	if (c_upto == NULL) {
+		// Something has gone very wrong with the creation
 		return -5;
 	}
 
 	if (*c_upto != 0) {
+		// The creation has not completed all the way
+		ARC_ATOMIC_DEC(node_a->ref_count);
+		ARC_ATOMIC_DEC(node_b->ref_count);
 		free(c_upto);
 		return -6;
 	}
@@ -456,16 +493,138 @@ int vfs_link(char *a, char *b, uint32_t mode) {
 	void *ticket = ticket_lock(&node_b->branch_lock);
 	ticket_lock_yield(ticket);
 	node_b->link = node_a;
-	// TODO: Write relative path from node B to node A into node B
+
 	ticket_unlock(ticket);
+
+	struct ARC_File fake = { .node = node_b };
+	char *rel_path = vfs_internal_get_relative_path(node_b, node_a);
+	vfs_write(rel_path, 1, strlen(rel_path), &fake);
+
+	ARC_ATOMIC_DEC(node_b->ref_count);
+
+	// NOTE: ref_count of Node A is left incremented as it is now in use by this link
 
 	return 0;
 }
 
 int vfs_rename(char *a, char *b) {
 	if (a == NULL || b == NULL) {
+		// Invalid parameters
 		return -1;
 	}
+
+	struct ARC_VFSNode *node_a = NULL;
+	char *upto = vfs_load_filepath(a, vfs_get_starting_node(a), 1, &node_a);
+
+	if (upto == NULL) {
+		// Something has gone very wrong
+		return -2;
+	}
+
+	if (*upto != 0) {
+		// The path to rename does not exist
+		ARC_ATOMIC_DEC(node_a->ref_count);
+		free(upto);
+		return -3;
+	}
+
+	free(upto);
+
+	struct ARC_VFSNode *node_b = NULL;
+	upto = vfs_load_filepath(b, vfs_get_starting_node(b), 1, &node_b);
+
+	if (upto == NULL) {
+		// Something has gone very wrong
+		return -5;
+	}
+
+	if (*upto == 0) {
+		// File path already exists, cannot overwrite
+		ARC_ATOMIC_DEC(node_a->ref_count);
+		ARC_ATOMIC_DEC(node_b->ref_count);
+
+		free(upto);
+		return -6;
+	}
+
+	struct ARC_VFSNodeInfo info = {
+	        .type = ARC_VFS_N_DIR,
+		.flags = 1,
+		.mode = node_a->stat.st_mode,
+		.driver_group = -1,
+        };
+
+	char *c_upto = vfs_create_filepath(upto, node_b, 1 | (1 << 1), &info, &node_b);
+	free(upto);
+
+	if (c_upto == NULL) {
+		// Something has gone very wrong
+		ARC_ATOMIC_DEC(node_a->ref_count);
+		ARC_ATOMIC_DEC(node_b->ref_count);
+
+		return -6;
+	}
+
+	// TODO: There is probably a better way to find out if this is the last
+	//       component from the traversal function
+	int sep_count = 0;
+	while (*c_upto != 0) {
+		if (*c_upto == '/') {
+			sep_count++;
+		}
+
+		c_upto++;
+	}
+
+	if (sep_count > 0) {
+		ARC_ATOMIC_DEC(node_a->ref_count);
+		ARC_ATOMIC_DEC(node_b->ref_count);
+
+		free(c_upto);
+		return -7;
+	}
+
+	void *ticket_parent = ticket_lock(&node_a->parent->branch_lock);
+	void *ticket_b = ticket_lock(&node_b->branch_lock);
+	ticket_lock_yield(ticket_parent);
+	ticket_lock_yield(ticket_b);
+
+	// TODO: Tell the drivers about this
+	// TODO: What if A and B are on different mount points?
+
+	if (node_a->prev != NULL) {
+		// Update Node A's prev->next pointer
+		node_a->prev->next = node_a->next;
+	} else {
+		// Otherwise it is the first in the list, update parent
+		node_a->parent->children = node_a->next;
+	}
+
+	// Update Node A's next->prev pointer
+	if (node_a->next != NULL) {
+		node_a->next->prev = node_a->prev;
+	}
+
+	// Update Node B's linked list
+	if (node_b->children != NULL) {
+		node_b->children->prev = node_a;
+	}
+
+	node_a->next = node_b->children;
+	node_b->children = node_a;
+	node_a->parent = node_b;
+
+	ticket_unlock(ticket_b);
+	ticket_unlock(ticket_parent);
+
+	if (node_a->type == ARC_VFS_N_LINK) {
+		struct ARC_File fake = { .node = node_b };
+		char *rel_path = vfs_internal_get_relative_path(node_b, node_a);
+		vfs_write(rel_path, 1, strlen(rel_path), &fake);
+	}
+
+	ARC_ATOMIC_DEC(node_a->ref_count);
+	ARC_ATOMIC_DEC(node_b->ref_count);
 
 	return 0;
 }
@@ -530,18 +689,44 @@ int vfs_list(char *path, int recurse) {
 	return 0;
 }
 
-struct ARC_VFSNode *vfs_create_rel(char *relative_path, struct ARC_VFSNode *start, uint32_t mode, int type, void *arg) {
-	if (relative_path == NULL || start == NULL || mode == 0 || type == ARC_VFS_NULL) {
-		return NULL;
-	}
-
-	return 0;
-}
-
 char *vfs_get_relative_path(char *a, char *b) {
 	if (a == NULL || b == NULL) {
 		return NULL;
 	}
 
-	return NULL;
+	struct ARC_VFSNode *node_a = NULL;
+	char *upto = vfs_load_filepath(a, vfs_get_starting_node(a), 1, &node_a);
+
+	if (upto == NULL) {
+		return NULL;
+	}
+
+	if (*upto != 0) {
+		ARC_ATOMIC_DEC(node_a->ref_count);
+		return NULL;
+	}
+
+	free(upto);
+
+	struct ARC_VFSNode *node_b = NULL;
+	upto = vfs_load_filepath(b, vfs_get_starting_node(b), 1, &node_b);
+
+	if (upto == NULL) {
+		return NULL;
+	}
+
+	if (*upto != 0) {
+		ARC_ATOMIC_DEC(node_a->ref_count);
+		ARC_ATOMIC_DEC(node_b->ref_count);
+		return NULL;
+	}
+
+	free(upto);
+
+	char *path = vfs_internal_get_relative_path(node_a, node_b);
+
+	ARC_ATOMIC_DEC(node_a->ref_count);
+	ARC_ATOMIC_DEC(node_b->ref_count);
+
+	return path;
 }
