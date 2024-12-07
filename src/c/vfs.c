@@ -37,7 +37,6 @@
 #define NODE_CACHE_SIZE 1024
 
 static struct ARC_VFSNode vfs_root = { 0 };
-char *vfs_root_name = "";
 
 static struct ARC_VFSNode *vfs_node_cache[1024] = { 0 };
 static uint64_t vfs_node_cache_idx = 0;
@@ -53,20 +52,9 @@ static struct ARC_VFSNode *vfs_get_starting_node(char *filepath) {
 	return NULL;
 }
 
-// NOTE: Expects a and b ref_count to be incremented by caller
-static char *vfs_internal_get_relative_path(struct ARC_VFSNode *a, struct ARC_VFSNode *b) {
-	if (a == NULL || b = NULL) {
-		return NULL;
-	}
-
-
-
-	return NULL;
-}
-
 int init_vfs() {
 	vfs_root.type = ARC_VFS_N_DIR;
-	vfs_root.name = vfs_root_name;
+	vfs_root.name = "";
 	init_static_ticket_lock(&vfs_root.branch_lock);
 	init_static_mutex(&vfs_root.property_lock);
 	init_static_spinlock(&vfs_node_cache_lock);
@@ -98,6 +86,8 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 
 	free(upto);
 
+	// TODO: Account for if node->children != NULL, should be able to just
+	//       save the pointer and mount the resource
 	if (node->type != ARC_VFS_N_DIR || node->children != NULL) {
 		return -4;
 	}
@@ -336,13 +326,11 @@ int vfs_close(struct ARC_File *file) {
 
 	struct ARC_VFSNode *node = file->node;
 
+	unrefrence_resource(file->reference);
 	ARC_ATOMIC_DEC(node->ref_count);
+	free(file);
 
 	if (node->ref_count > 0) {
-		unrefrence_resource(file->reference);
-		ARC_ATOMIC_DEC(node->ref_count);
-		free(file);
-
 		return 0;
 	}
 
@@ -353,8 +341,9 @@ int vfs_close(struct ARC_File *file) {
 
 	idx--;
 
-	vfs_delete_node(vfs_node_cache[idx], 1);
-	vfs_node_cache[idx] = node;
+	vfs_delete_node(node, 1);
+//	vfs_delete_node(vfs_node_cache[idx], 1);
+//	vfs_node_cache[idx] = node;
 
 	return 0;
 }
@@ -497,7 +486,7 @@ int vfs_link(char *a, char *b, int32_t mode) {
 	ticket_unlock(ticket);
 
 	struct ARC_File fake = { .node = node_b };
-	char *rel_path = vfs_internal_get_relative_path(node_b, node_a);
+	char *rel_path = vfs_get_path_from_nodes(node_b, node_a);
 	vfs_write(rel_path, 1, strlen(rel_path), &fake);
 
 	ARC_ATOMIC_DEC(node_b->ref_count);
@@ -619,7 +608,7 @@ int vfs_rename(char *a, char *b) {
 
 	if (node_a->type == ARC_VFS_N_LINK) {
 		struct ARC_File fake = { .node = node_b };
-		char *rel_path = vfs_internal_get_relative_path(node_b, node_a);
+		char *rel_path = vfs_get_path_from_nodes(node_b, node_a);
 		vfs_write(rel_path, 1, strlen(rel_path), &fake);
 	}
 
@@ -656,12 +645,12 @@ static int internal_vfs_list(struct ARC_VFSNode *node, int level, int org) {
 			printf("\t");
 		}
 		if (children->type != ARC_VFS_N_LINK) {
-			printf("%s (%s, %o, 0x%x B)\n", children->name, names[children->type], children->stat.st_mode, children->stat.st_size);
+			printf("%s (%s, %o, 0x%x B, %d)\n", children->name, names[children->type], children->stat.st_mode, children->stat.st_size, children->ref_count);
 		} else {
 			if (children->link == NULL) {
-				printf("%s (Broken Link, %o, 0x%x B) -/> NULL\n", children->name, children->stat.st_mode, children->stat.st_size);
+				printf("%s (Broken Link, %o, 0x%x B, %d) -/> NULL\n", children->name, children->stat.st_mode, children->stat.st_size, children->ref_count);
 			} else {
-				printf("%s (Link, %o, 0x%x B) -> %s\n", children->name, children->stat.st_mode, children->stat.st_size, children->link->name);
+				printf("%s (Link, %o, 0x%x B, %d) -> %s\n", children->name, children->stat.st_mode, children->stat.st_size, children->link->name, children->ref_count);
 			}
 		}
 
@@ -689,7 +678,7 @@ int vfs_list(char *path, int recurse) {
 	return 0;
 }
 
-char *vfs_get_relative_path(char *a, char *b) {
+char *vfs_get_path(char *a, char *b) {
 	if (a == NULL || b == NULL) {
 		return NULL;
 	}
@@ -723,7 +712,7 @@ char *vfs_get_relative_path(char *a, char *b) {
 
 	free(upto);
 
-	char *path = vfs_internal_get_relative_path(node_a, node_b);
+	char *path = vfs_get_path_from_nodes(node_a, node_b);
 
 	ARC_ATOMIC_DEC(node_a->ref_count);
 	ARC_ATOMIC_DEC(node_b->ref_count);

@@ -58,5 +58,8 @@ char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t fl
 // NOTE: Flags is bitwise OR'd with 1, setting link resolution, do not depend on this behavior, set it yourself
 char *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNode **end);
 char *vfs_traverse_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNode **end);
+// NOTE: Expects a and b ref_count to be incremented by caller or have both nodes' branch_locks
+//       held
+char *vfs_get_path_from_nodes(struct ARC_VFSNode *a, struct ARC_VFSNode *b);
 
 #endif

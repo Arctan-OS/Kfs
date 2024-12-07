@@ -189,8 +189,8 @@ int vfs_rename(char *a, char *b);
 int vfs_list(char *path, int recurse);
 
 /**
- * Get the relative path from B to A.
+ * Get the path from B to A.
  * */
-char *vfs_get_relative_path(char *a, char *b);
+char *vfs_get_path(char *a, char *b);
 
 #endif

@@ -110,22 +110,107 @@ static int vfs_infer_driver(struct ARC_VFSNode *mount, struct ARC_VFSNodeInfo *i
 }
 
 int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
+        // Flags:
+        //  Bit | Description
+        //  0   | 1: Prune upwards
+        //  1   | 1: Delete physically
+	// TODO: Figure out return values
+	int loop_count = -1;
+
+	top:;
+	if (node == NULL) {
+		return loop_count;
+	}
+
+	if (node->type == ARC_VFS_N_DIR && node->children != NULL) {
+		ARC_DEBUG(ERR, "Directory node still has children, aborting\n");
+		return -2;
+	}
+
+	if (node->mount == NULL && MASKED_READ(flags, 1, 1) != 1) {
+		// Do not delete nodes that are have their data stored
+		// in memory unless explicitly specified
+		ARC_DEBUG(ERR, "Cannot delete memory-based node without physical delete set\n");
+		return -3;
+	}
+
+	struct ARC_VFSNode *parent = node->parent;
+	void *ticket = ticket_lock(&parent->branch_lock);
+	if (ticket == NULL) {
+		ARC_DEBUG(ERR, "Failed to lock node\n");
+		return -4;
+	}
+	ticket_lock_yield(ticket);
+
+	if (node->ref_count > 0) {
+		ARC_DEBUG(ERR, "Node is still in use\n");
+		ticket_unlock(ticket);
+
+		return -5;
+	}
+
+	if (node->prev != NULL) {
+		node->prev->next = node->next;
+	} else {
+		node->parent->children = node->next;
+	}
+
+	if (node->next != NULL) {
+		node->next->prev = node->prev;
+	}
+
+	if (node->type == ARC_VFS_N_LINK && node->link != NULL) {
+		ARC_ATOMIC_DEC(node->link->ref_count);
+	}
+
+	if (node->resource != NULL) {
+		uninit_resource(node->resource);
+	}
+
+	if (node->mount != NULL && MASKED_READ(flags, 1, 1) == 1) {
+		struct ARC_SuperDriverDef *def = node->mount->resource->driver->driver;
+		def->remove(vfs_get_path_from_nodes(node->mount, node));
+	}
+
+	free(node->name);
+	free(node);
+
+	if (MASKED_READ(flags, 0, 1) == 1) {
+		ticket_unlock(ticket);
+		node = parent;
+		goto top;
+	}
+
+	return 0;
+}
+
+static int internal_vfs_recursive_delete(struct ARC_VFSNode *node) {
 	if (node == NULL) {
 		return -1;
 	}
 
-	if (node->ref_count > 0) {
-		return -2;
+	if (node->children == NULL) {
+		return 0;
 	}
 
-	// Branch lock
-	// If node->type == LINK:
-	//  Unincrement ref_count of resolve
-	//
-	// Change prev->next to node->next (more likely)
-	// Change next->prev to prev (less likely)
+	int in_use = 0;
 
-	return 0;
+	struct ARC_VFSNode *old_children = node->children;
+	node->children = NULL;
+
+	// TODO: Possibly do this iteratively? Recursive is fine for now
+	struct ARC_VFSNode *children = old_children;
+	while (children != NULL) {
+		// TODO: This
+		children = children->next;
+	}
+
+
+	return in_use;
+}
+
+int vfs_recursive_delete(struct ARC_VFSNode *node) {
+	// External function call for internal delete
 }
 
 struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size_t name_len, struct ARC_VFSNodeInfo *info) {
@@ -285,6 +370,9 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 			goto next_iter;
 		}
 
+		void *ticket = ticket_lock(&node->branch_lock);
+		ticket_lock_yield(ticket);
+
 		struct ARC_VFSNode *children = node->children;
 		while (children != NULL) {
 			if (strncmp(comp_base, children->name, max(strlen(children->name), comp_len)) == 0) {
@@ -299,6 +387,8 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 		if (callback != NULL && next == NULL) {
 			next = callback(node, comp_base, comp_len, mount_path, callback_args);
 		}
+
+		ticket_unlock(ticket);
 
 		if (next == NULL) {
 			ARC_DEBUG(ERR, "Quiting traversal of %s, no next node found\n", filepath);
@@ -387,23 +477,6 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 		mount = node;
 	}
 
-	void *ticket = ticket_lock(&node->branch_lock);
-	ticket_lock_yield(ticket);
-
-	struct ARC_VFSNode *children = node->children;
-	while (children != NULL) {
-		if (strncmp(comp, children->name, max(strlen(children->name), comp_len)) == 0) {
-			break;
-		}
-
-		children = children->next;
-	}
-
-	if (children != NULL) {
-		ticket_unlock(ticket);
-		return children;
-	}
-
 	if (comp[comp_len] == 0) {
 		int phys_ret = 0;
 
@@ -423,8 +496,6 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 		struct ARC_VFSNodeInfo local_info = { .type = ARC_VFS_N_DIR, .driver_group = -1 };
 		ret = vfs_create_node(node, comp, comp_len, &local_info);
 	}
-
-	ticket_unlock(ticket);
 
 	return ret;
 }
@@ -461,23 +532,6 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 		return NULL;
 	}
 
-	void *ticket = ticket_lock(&node->branch_lock);
-	ticket_lock_yield(ticket);
-
-	struct ARC_VFSNode *children = node->children;
-	while (children != NULL) {
-		if (strncmp(comp, children->name, max(strlen(children->name), comp_len)) == 0) {
-			break;
-		}
-
-		children = children->next;
-	}
-
-	if (children != NULL) {
-		ticket_unlock(ticket);
-		return children;
-	}
-
 	// NOTE: This would stat the file each time that this callback
 	//       is called. This is not ideal as it limits the speed, perhaps
 	//       implement a way of caching the result of this stat
@@ -506,8 +560,6 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 		ret = vfs_create_node(node, comp, comp_len, &info);
 	}
 
-	ticket_unlock(ticket);
-
 	return ret;
 }
 
@@ -531,4 +583,13 @@ char *vfs_traverse_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t 
 	ARC_DEBUG(INFO, "Traversing %s\n", filepath);
 
 	return internal_vfs_traverse(filepath, start, flags, end, NULL, NULL);
+}
+
+
+char *vfs_get_path_from_nodes(struct ARC_VFSNode *a, struct ARC_VFSNode *b) {
+	if (a == NULL || b == NULL) {
+		return NULL;
+	}
+
+	return NULL;
 }
