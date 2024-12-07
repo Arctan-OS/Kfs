@@ -645,12 +645,12 @@ static int internal_vfs_list(struct ARC_VFSNode *node, int level, int org) {
 			printf("\t");
 		}
 		if (children->type != ARC_VFS_N_LINK) {
-			printf("%s (%s, %o, 0x%x B, %d)\n", children->name, names[children->type], children->stat.st_mode, children->stat.st_size, children->ref_count);
+			printf("%s (%s, %o, 0x%x B)\n", children->name, names[children->type], children->stat.st_mode, children->stat.st_size);
 		} else {
 			if (children->link == NULL) {
-				printf("%s (Broken Link, %o, 0x%x B, %d) -/> NULL\n", children->name, children->stat.st_mode, children->stat.st_size, children->ref_count);
+				printf("%s (Broken Link, %o, 0x%x B) -/> NULL\n", children->name, children->stat.st_mode, children->stat.st_size);
 			} else {
-				printf("%s (Link, %o, 0x%x B, %d) -> %s\n", children->name, children->stat.st_mode, children->stat.st_size, children->link->name, children->ref_count);
+				printf("%s (Link, %o, 0x%x B) -> %s\n", children->name, children->stat.st_mode, children->stat.st_size, children->link->name);
 			}
 		}
 
