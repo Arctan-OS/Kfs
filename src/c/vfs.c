@@ -460,7 +460,7 @@ int vfs_link(char *a, char *b, int32_t mode) {
 	struct ARC_VFSNodeInfo info = {
 	        .type = ARC_VFS_N_LINK,
 		.mode = mode == -1 ? MASKED_READ(node_a->stat.st_mode, 0, 0x1FF) : MASKED_READ(mode, 0, 0x1FF),
-		.driver_group = -1,
+		.driver_index = (uint64_t)-1
         };
 
 	char *c_upto = vfs_create_filepath(upto, node_b, 1, &info, &node_b);
@@ -540,7 +540,7 @@ int vfs_rename(char *a, char *b) {
 	        .type = ARC_VFS_N_DIR,
 		.flags = 1,
 		.mode = node_a->stat.st_mode,
-		.driver_group = -1,
+		.driver_index = (uint64_t)-1
         };
 
 	char *c_upto = vfs_create_filepath(upto, node_b, 1 | (1 << 1), &info, &node_b);

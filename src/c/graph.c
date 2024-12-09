@@ -73,25 +73,13 @@ static int vfs_type2stat(int type) {
 	}
 }
 
-static int vfs_type2dri_group(struct ARC_VFSNode *mount, int type) {
-	if (type == ARC_VFS_N_DIR || type == ARC_VFS_NULL) {
-		return -1;
-	}
-
-	if (mount == NULL) {
-		return 0;
-	}
-
-	return mount->resource->dri_group;
-}
-
 static uint64_t vfs_type2dri_index(struct ARC_VFSNode *mount, int type) {
 	if (type == ARC_VFS_N_DIR) {
 		return 0;
 	}
 
 	if (mount == NULL) {
-		return ARC_FDRI_BUFFER;
+		return ARC_DRIDEF_BUFFER_FILE;
 	}
 
 	return mount->resource->dri_index + 1;
@@ -103,8 +91,7 @@ static int vfs_infer_driver(struct ARC_VFSNode *mount, struct ARC_VFSNodeInfo *i
 		return -1;
 	}
 
-	if (info->driver_group == -1) {
-		info->driver_group = vfs_type2dri_group(mount, info->type);
+	if (info->driver_index == (uint64_t)-1) {
 		info->driver_index = vfs_type2dri_index(mount, info->type);
 	}
 }
@@ -237,7 +224,7 @@ struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size
 	node->type = info->type;
 
 	if (info->resource_overwrite == NULL) {
-		node->resource = init_resource(info->driver_group, info->driver_index, info->driver_arg);
+		node->resource = init_resource(info->driver_index, info->driver_arg);
 	} else {
 		node->resource = info->resource_overwrite;
 	}
@@ -493,7 +480,7 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 		}
 	} else {
 		// Create a directory
-		struct ARC_VFSNodeInfo local_info = { .type = ARC_VFS_N_DIR, .driver_group = -1 };
+		struct ARC_VFSNodeInfo local_info = { .type = ARC_VFS_N_DIR, .driver_index = (uint64_t)-1 };
 		ret = vfs_create_node(node, comp, comp_len, &local_info);
 	}
 
@@ -547,7 +534,7 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 
 	// The node does exist, proceed with creation
 	if (comp[comp_len] == 0) {
-		struct ARC_VFSNodeInfo info = { .driver_group = -1, .type = vfs_mode2type(stat.st_mode) };
+		struct ARC_VFSNodeInfo info = { .driver_index = (uint64_t)-1, .type = vfs_mode2type(stat.st_mode) };
 		vfs_infer_driver(mount, &info);
 
 		struct ARC_SuperDriverDef *def = mount->resource->driver->driver;
@@ -556,7 +543,7 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 		ret = vfs_create_node(node, comp, comp_len, &info);
 		memcpy(&ret->stat, &stat, sizeof(stat));
 	} else {
-		struct ARC_VFSNodeInfo info = { .type = ARC_VFS_N_DIR, .driver_group = -1 };
+		struct ARC_VFSNodeInfo info = { .type = ARC_VFS_N_DIR, .driver_index = (uint64_t)-1 };
 		ret = vfs_create_node(node, comp, comp_len, &info);
 	}
 

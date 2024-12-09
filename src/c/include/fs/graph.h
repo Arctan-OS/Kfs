@@ -36,7 +36,6 @@ struct ARC_VFSNodeInfo {
 	struct ARC_Resource *resource_overwrite;
 	void *driver_arg;
 	uint64_t driver_index;
-	int driver_group;
 	uint32_t flags; // Bit | Description
 			// 0   | 1: Infer driver definition
 	uint32_t mode;
