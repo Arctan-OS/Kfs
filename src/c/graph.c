@@ -110,14 +110,14 @@ int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
 	}
 
 	if (node->type == ARC_VFS_N_DIR && node->children != NULL) {
-		ARC_DEBUG(ERR, "Directory node still has children, aborting\n");
+		ARC_DEBUG(ERR, "Directory node, \"%s\", still has children, aborting\n", node->name);
 		return -2;
 	}
 
 	if (node->mount == NULL && MASKED_READ(flags, 1, 1) != 1) {
 		// Do not delete nodes that are have their data stored
 		// in memory unless explicitly specified
-		ARC_DEBUG(ERR, "Cannot delete memory-based node without physical delete set\n");
+		ARC_DEBUG(ERR, "Cannot delete memory-based node, \"%s\", without physical delete set\n", node->name);
 		return -3;
 	}
 
@@ -159,11 +159,14 @@ int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
 		def->remove(vfs_get_path_from_nodes(node->mount, node));
 	}
 
+	ARC_DEBUG(INFO, "Deleted node, \"%s\", successfully\n", node->name);
+
 	free(node->name);
 	free(node);
 
+	ticket_unlock(ticket);
+
 	if (MASKED_READ(flags, 0, 1) == 1) {
-		ticket_unlock(ticket);
 		node = parent;
 		goto top;
 	}
@@ -171,33 +174,36 @@ int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
 	return 0;
 }
 
-static int internal_vfs_recursive_delete(struct ARC_VFSNode *node) {
+static int internal_vfs_recursive_delete(struct ARC_VFSNode *node, uint32_t flags) {
 	if (node == NULL) {
-		return -1;
-	}
-
-	if (node->children == NULL) {
 		return 0;
 	}
 
 	int in_use = 0;
 
-	struct ARC_VFSNode *old_children = node->children;
-	node->children = NULL;
-
-	// TODO: Possibly do this iteratively? Recursive is fine for now
-	struct ARC_VFSNode *children = old_children;
-	while (children != NULL) {
-		// TODO: This
-		children = children->next;
+	// NOTE: This works because when a node is deleted the parent node's children pointer
+	//       is updated in the event it is the first node
+	while (node->children != NULL) {
+		in_use += internal_vfs_recursive_delete(node->children, flags);
 	}
 
+	if (in_use > 0) {
+		return in_use;
+	}
 
-	return in_use;
+	// NOTE: Upwards prune must be disabled
+	if (vfs_delete_node(node, flags & (~1)) != 0) {
+		return 1;
+	}
 }
 
-int vfs_recursive_delete(struct ARC_VFSNode *node) {
-	// External function call for internal delete
+int vfs_delete_node_recursive(struct ARC_VFSNode *node, uint32_t flags) {
+	void *parent = node->parent;
+
+	internal_vfs_recursive_delete(node, flags & (~1));
+	vfs_delete_node(parent, flags);
+
+	return 0;
 }
 
 struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size_t name_len, struct ARC_VFSNodeInfo *info) {

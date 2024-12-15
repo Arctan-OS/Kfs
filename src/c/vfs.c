@@ -411,7 +411,11 @@ int vfs_remove(char *filepath, bool recurse) {
 		return -3;
 	}
 
-	vfs_delete_node(node, recurse | (1 << 1));
+	if (recurse) {
+		vfs_delete_node_recursive(node, 1 | (1 << 1));
+	} else {
+		vfs_delete_node(node, 1 | (1 << 1));
+	}
 
 	return 0;
 }
@@ -486,7 +490,7 @@ int vfs_link(char *a, char *b, int32_t mode) {
 	ticket_unlock(ticket);
 
 	struct ARC_File fake = { .node = node_b };
-	char *rel_path = vfs_get_path_from_nodes(node_b, node_a);
+	char *rel_path = vfs_get_path(b, a);
 	vfs_write(rel_path, 1, strlen(rel_path), &fake);
 
 	ARC_ATOMIC_DEC(node_b->ref_count);
@@ -679,43 +683,44 @@ int vfs_list(char *path, int recurse) {
 }
 
 char *vfs_get_path(char *a, char *b) {
+	// Get path from A to B
 	if (a == NULL || b == NULL) {
 		return NULL;
 	}
 
-	struct ARC_VFSNode *node_a = NULL;
-	char *upto = vfs_load_filepath(a, vfs_get_starting_node(a), 1, &node_a);
+	size_t max = min(strlen(a), strlen(b));
+	size_t delta = 0;
+	for (size_t i = 0; i < max; i++) {
+		if (a[i] != b[i]) {
+			break;
+		}
 
-	if (upto == NULL) {
-		return NULL;
+		if (a[i] == '/') {
+			delta = i;
+		}
 	}
 
-	if (*upto != 0) {
-		ARC_ATOMIC_DEC(node_a->ref_count);
-		return NULL;
+	//             + +
+	// A: a/b/c/d/e/f/g.txt
+	// B: a/b/c/d/x.txt
+	//            ^
+
+	int dot_dots = 0;
+	for (size_t i = strlen(a) - 1; i > delta; i--) {
+		if (a[i] == '/') {
+			dot_dots++;
+		}
 	}
 
-	free(upto);
+	size_t fin_size = (dot_dots * 3) + strlen(b + delta);
 
-	struct ARC_VFSNode *node_b = NULL;
-	upto = vfs_load_filepath(b, vfs_get_starting_node(b), 1, &node_b);
+	char *path = (char *)alloc(fin_size + 1);
+	memset(path, 0, fin_size + 1);
 
-	if (upto == NULL) {
-		return NULL;
+	for (int i = 0; i < dot_dots; i++) {
+		sprintf(path + (i * 3), "../");
 	}
-
-	if (*upto != 0) {
-		ARC_ATOMIC_DEC(node_a->ref_count);
-		ARC_ATOMIC_DEC(node_b->ref_count);
-		return NULL;
-	}
-
-	free(upto);
-
-	char *path = vfs_get_path_from_nodes(node_a, node_b);
-
-	ARC_ATOMIC_DEC(node_a->ref_count);
-	ARC_ATOMIC_DEC(node_b->ref_count);
+	sprintf(path + (dot_dots * 3), "%s", b + delta + 1);
 
 	return path;
 }

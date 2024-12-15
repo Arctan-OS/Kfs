@@ -52,6 +52,7 @@ struct ARC_VFSNodeInfo {
  *  1   | Physical delete
  * */
 int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags);
+int vfs_delete_node_recursive(struct ARC_VFSNode *node, uint32_t flags);
 // NOTE: Flags is bitwise OR'd with 1, setting link resolution, do not depend on this behavior, set it yourself
 char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNodeInfo *info, struct ARC_VFSNode **end);
 // NOTE: Flags is bitwise OR'd with 1, setting link resolution, do not depend on this behavior, set it yourself
