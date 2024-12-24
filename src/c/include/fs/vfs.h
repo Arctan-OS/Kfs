@@ -68,8 +68,11 @@ struct ARC_VFSNode {
 	struct ARC_VFSNode *prev;
 	/// Lock on branching of this node (link, parent, children, next, prev, name)
 	struct ARC_TicketLock branch_lock;
-	/// Pointer to the device. References can be found through consulting resource.
-	struct ARC_Resource *resource;
+	union {
+		// Is an ARC_Resource in the event type != ARC_VFS_N_DIR
+		struct ARC_Resource *resource;
+		void *hint;
+	} u1;
 	/// The name of this node.
 	char *name;
 	/// Number of references to this node (> 0 means node and children cannot be destroyed).

@@ -95,11 +95,9 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 	mutex_lock(&node->property_lock);
 
 	node->type = ARC_VFS_N_MOUNT;
-	node->resource = resource;
+	node->u1.resource = resource;
 
 	mutex_unlock(&node->property_lock);
-
-	// NOTE: Shouldn't a reference be created to the resource?
 
 	// ref_count remains incremented to ensure it cannot be deleted
 
@@ -118,7 +116,7 @@ int vfs_unmount(struct ARC_VFSNode *node) {
 	mutex_lock(&node->property_lock);
 
 	node->type = ARC_VFS_N_MOUNT;
-	node->resource = NULL;
+	node->u1.resource = NULL;
 
 	mutex_unlock(&node->property_lock);
 
@@ -171,7 +169,6 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	file->mode = mode;
 	file->flags = flags;
 	file->node = node;
-	file->reference = reference_resource(node->resource);
 
 	*ret = file;
 
@@ -207,7 +204,7 @@ int vfs_read(void *buffer, size_t size, size_t count, struct ARC_File *file) {
 		return 0;
 	}
 
-	struct ARC_Resource *res = node->resource;
+	struct ARC_Resource *res = node->u1.resource;
 
 	if (res == NULL) {
 		ARC_ATOMIC_DEC(file->ref_count);
@@ -250,7 +247,7 @@ int vfs_write(void *buffer, size_t size, size_t count, struct ARC_File *file) {
 		return 0;
 	}
 
-	struct ARC_Resource *res = node->resource;
+	struct ARC_Resource *res = node->u1.resource;
 
 	if (res == NULL) {
 		ARC_ATOMIC_DEC(file->ref_count);
@@ -326,7 +323,6 @@ int vfs_close(struct ARC_File *file) {
 
 	struct ARC_VFSNode *node = file->node;
 
-	unrefrence_resource(file->reference);
 	ARC_ATOMIC_DEC(node->ref_count);
 	free(file);
 
@@ -348,6 +344,7 @@ int vfs_close(struct ARC_File *file) {
 	return 0;
 }
 
+// TODO: What if the given filepath is a directory?
 int vfs_stat(char *filepath, struct stat *stat) {
 	if (filepath == NULL || stat == NULL) {
 		return -1;
@@ -366,7 +363,7 @@ int vfs_stat(char *filepath, struct stat *stat) {
 		return -3;
 	}
 
-	int ret = node->resource->driver->stat(node->resource, NULL, stat);
+	int ret = node->u1.resource->driver->stat(node->u1.resource, NULL, stat, NULL);
 
 	ARC_ATOMIC_DEC(node->ref_count);
 
