@@ -68,6 +68,7 @@ int init_vfs() {
 
 int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 	if (mountpoint == NULL || resource == NULL) {
+		ARC_DEBUG(ERR, "Resource or mount path are NULL\n");
 		return -1;
 	}
 
@@ -76,10 +77,12 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 	char *upto = vfs_traverse_filepath(mountpoint, vfs_get_starting_node(mountpoint), 1, &node);
 
 	if (upto == NULL || node == NULL) {
+		ARC_DEBUG(ERR, "Traversal failed\n");
 		return -2;
 	}
 
 	if (*upto != 0) {
+		ARC_DEBUG(ERR, "Traversla failed\n");
 		free(upto);
 		return -3;
 	}
@@ -89,6 +92,7 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 	// TODO: Account for if node->children != NULL, should be able to just
 	//       save the pointer and mount the resource
 	if (node->type != ARC_VFS_N_DIR || node->children != NULL) {
+		ARC_DEBUG(ERR, "Cannot mount on directory with children or non-directories\n");
 		return -4;
 	}
 
@@ -106,10 +110,12 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 
 int vfs_unmount(struct ARC_VFSNode *node) {
 	if (node == NULL) {
+		ARC_DEBUG(ERR, "No node given\n");
 		return -1;
 	}
 
 	if (node->type != ARC_VFS_N_MOUNT) {
+		ARC_DEBUG(ERR, "Cannot unmount non-mounted node\n");
 		return -2;
 	}
 
@@ -126,6 +132,10 @@ int vfs_unmount(struct ARC_VFSNode *node) {
 }
 
 int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
+	if (ret != NULL) {
+		*ret = NULL;
+	}
+
 	if (path == NULL || mode == 0 || ret == NULL) {
 		return -1;
 	}
@@ -134,6 +144,7 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	char *upto = vfs_load_filepath(path, vfs_get_starting_node(path), 1, &node);
 
 	if (upto == NULL) {
+		ARC_DEBUG(ERR, "Traversal failed\n");
 		return -2;
 	}
 
@@ -145,10 +156,12 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	}
 
 	if (upto == NULL) {
+		ARC_DEBUG(ERR, "Traversal failed\n");
 		return -3;
 	}
 
 	if (*upto != 0) {
+		ARC_DEBUG(ERR, "Traversal failed\n");
 		free(upto);
 		return -4;
 	}

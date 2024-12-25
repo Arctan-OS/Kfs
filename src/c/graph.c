@@ -477,7 +477,6 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 	char *use_path = strndup(comp, comp_len);
 	void *use_hint = node->u1.hint;
 	if (use_hint == NULL && mount_path != NULL) {
-		printf("HINT IS NULL\n");
 		free(use_path);
 		use_path = strndup(mount_path, (uintptr_t)comp - (uintptr_t)mount_path + comp_len);
 	}
@@ -539,14 +538,13 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 
 	if (mount == NULL) {
 		// There is no mount so there is no reason to stat
-		ARC_DEBUG(ERR, "No mountpoint found, quiting load of %s\n", mount_path);
+		ARC_DEBUG(ERR, "No mountpoint found, quiting load of %s\n", comp);
 		return NULL;
 	}
 
 	char *use_path = strndup(comp, comp_len);
 	void *use_hint = node->u1.hint;
 	if (use_hint == NULL && mount_path != NULL) {
-		printf("HINT IS NULL\n");
 		free(use_path);
 		use_path = strndup(mount_path, (uintptr_t)comp - (uintptr_t)mount_path + comp_len);
 	}
