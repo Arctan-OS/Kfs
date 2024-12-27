@@ -32,17 +32,6 @@
 #include <stdbool.h>
 #include <fs/vfs.h>
 
-struct ARC_VFSNodeInfo {
-	struct ARC_Resource *resource_overwrite;
-	void *driver_arg;
-	uint64_t driver_index;
-	uint32_t flags; // Bit | Description
-			// 0   | 1: Infer driver definition
-	uint32_t mode;
-	int type;
-	int code; // Return code of function that used info struct
-};
-
 /**
  * Deletes a
  *

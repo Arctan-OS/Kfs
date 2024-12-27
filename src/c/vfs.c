@@ -190,7 +190,7 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	return 0;
 }
 
-int vfs_read(void *buffer, size_t size, size_t count, struct ARC_File *file) {
+size_t vfs_read(void *buffer, size_t size, size_t count, struct ARC_File *file) {
 	if (buffer == NULL || size == 0 || count == 0 || file == NULL) {
 		return 0;
 	}
@@ -233,7 +233,7 @@ int vfs_read(void *buffer, size_t size, size_t count, struct ARC_File *file) {
 	return ret;
 }
 
-int vfs_write(void *buffer, size_t size, size_t count, struct ARC_File *file) {
+size_t vfs_write(void *buffer, size_t size, size_t count, struct ARC_File *file) {
 	if (buffer == NULL || size == 0 || count == 0 || file == NULL) {
 		return 0;
 	}
@@ -350,9 +350,8 @@ int vfs_close(struct ARC_File *file) {
 
 	idx--;
 
-	vfs_delete_node(node, 1);
-//	vfs_delete_node(vfs_node_cache[idx], 1);
-//	vfs_node_cache[idx] = node;
+	vfs_delete_node(vfs_node_cache[idx], 1);
+	vfs_node_cache[idx] = node;
 
 	return 0;
 }
@@ -659,12 +658,12 @@ static int internal_vfs_list(struct ARC_VFSNode *node, int level, int org) {
 			printf("\t");
 		}
 		if (children->type != ARC_VFS_N_LINK) {
-			printf("%s (%s, %o, 0x%x B)\n", children->name, names[children->type], children->stat.st_mode, children->stat.st_size);
+			printf("%s (%s, %o, 0x%"PRIx64" B)\n", children->name, names[children->type], children->stat.st_mode, children->stat.st_size);
 		} else {
 			if (children->link == NULL) {
-				printf("%s (Broken Link, %o, 0x%x B) -/> NULL\n", children->name, children->stat.st_mode, children->stat.st_size);
+				printf("%s (Broken Link, %o, 0x%"PRIx64" B) -/> NULL\n", children->name, children->stat.st_mode, children->stat.st_size);
 			} else {
-				printf("%s (Link, %o, 0x%x B) -> %s\n", children->name, children->stat.st_mode, children->stat.st_size, children->link->name);
+				printf("%s (Link, %o, 0x%"PRIx64" B) -> %s\n", children->name, children->stat.st_mode, children->stat.st_size, children->link->name);
 			}
 		}
 

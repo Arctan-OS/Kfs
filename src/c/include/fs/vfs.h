@@ -46,7 +46,6 @@
 #include <lib/resource.h>
 #include <lib/atomics.h>
 #include <stdbool.h>
-#include <fs/graph.h>
 #include <abi-bits/seek-whence.h>
 
 /**
@@ -84,6 +83,17 @@ struct ARC_VFSNode {
 	bool is_open;
 	// Stat
 	struct stat stat;
+};
+
+struct ARC_VFSNodeInfo {
+	struct ARC_Resource *resource_overwrite;
+	void *driver_arg;
+	uint64_t driver_index;
+	uint32_t flags; // Bit | Description
+			// 0   | 1: Infer driver definition
+	uint32_t mode;
+	int type;
+	int code; // Return code of function that used info struct
 };
 
 /**
@@ -139,7 +149,7 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret);
  * @param struct ARC_File *file - The file to read.
  * @return the number of bytes read.
  * */
-int vfs_read(void *buffer, size_t size, size_t count, struct ARC_File *file);
+size_t vfs_read(void *buffer, size_t size, size_t count, struct ARC_File *file);
 
 /**
  * Write to the given file.
@@ -153,7 +163,7 @@ int vfs_read(void *buffer, size_t size, size_t count, struct ARC_File *file);
  * @param struct ARC_VFSNode *file - The file to write.
  * @return the number of bytes written.
  * */
-int vfs_write(void *buffer, size_t size, size_t count, struct ARC_File *file);
+size_t vfs_write(void *buffer, size_t size, size_t count, struct ARC_File *file);
 
 /**
  * Change the offset in the given file.

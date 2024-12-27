@@ -94,6 +94,8 @@ static int vfs_infer_driver(struct ARC_VFSNode *mount, struct ARC_VFSNodeInfo *i
 	if (info->driver_index == (uint64_t)-1) {
 		info->driver_index = vfs_type2dri_index(mount, info->type);
 	}
+
+	return 0;
 }
 
 int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
@@ -157,7 +159,7 @@ int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
 	}
 
 	if (node->mount != NULL && MASKED_READ(flags, 1, 1) == 1) {
-		struct ARC_SuperDriverDef *def = node->mount->u1.resource->driver->driver;
+		struct ARC_DriverDef *def = node->mount->u1.resource->driver;
 		def->remove(parent->u1.hint == NULL ? vfs_get_path_from_nodes(node->mount, node) : node->name, parent->u1.hint);
 	}
 
@@ -197,6 +199,8 @@ static int internal_vfs_recursive_delete(struct ARC_VFSNode *node, uint32_t flag
 	if (vfs_delete_node(node, flags & (~1)) != 0) {
 		return 1;
 	}
+
+	return 0;
 }
 
 int vfs_delete_node_recursive(struct ARC_VFSNode *node, uint32_t flags) {
@@ -210,14 +214,14 @@ int vfs_delete_node_recursive(struct ARC_VFSNode *node, uint32_t flags) {
 
 struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size_t name_len, struct ARC_VFSNodeInfo *info) {
 	if (parent == NULL || name == NULL || name_len == 0 || info == NULL || info->type == ARC_VFS_NULL) {
-		ARC_DEBUG(ERR, "Failed to create node, improper parameters (%p %p %d %d %p)\n", parent, name, name_len, info != NULL ? info->type : -1, info);
+		ARC_DEBUG(ERR, "Failed to create node, improper parameters (%p %s %lu %d)\n", parent, name, name_len, info != NULL ? info->type : -1);
 		return NULL;
 	}
 
 	struct ARC_VFSNode *node = (struct ARC_VFSNode *)alloc(sizeof(*node));
 
 	if (node == NULL) {
-		ARC_DEBUG(ERR, "Failed to allocate memory for new node (%.*s)\n", name, name_len);
+		ARC_DEBUG(ERR, "Failed to allocate memory for new node (%.*s)\n", (uint32_t)name_len, name);
 		return NULL;
 	}
 
@@ -253,6 +257,8 @@ struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size
 	if (node->u1.resource != NULL) {
 		node->u1.resource->driver->stat(node->u1.resource, NULL, &node->stat, NULL);
 	}
+
+	node->stat.st_mode = (info->mode & 00777) | vfs_type2stat(info->type);
 
 	return node;
 }
@@ -309,7 +315,7 @@ static char *vfs_read_link(struct ARC_VFSNode *link) {
 
 	struct ARC_File fake = { .mode = ARC_STD_PERM, .node = link };
 
-	if (vfs_read(path, 1, link->stat.st_size, &fake) != link->stat.st_size) {
+	if (vfs_read(path, 1, link->stat.st_size, &fake) != (size_t)link->stat.st_size) {
 		free(path);
 		return NULL;
 	}
@@ -461,7 +467,7 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 
 static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node, char *comp, size_t comp_len, char *mount_path, void *args) {
 	if (node == NULL || comp == NULL || comp_len == 0 || args == NULL) {
-		ARC_DEBUG(ERR, "Quiting create callback, improper parameters (%p %p %d %p)\n", node, comp, comp_len, args);
+		ARC_DEBUG(ERR, "Quiting create callback, improper parameters (%p %s %lu %p)\n", node, comp, comp_len, args);
 		return NULL;
 	}
 
@@ -492,8 +498,7 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 	if (mount != NULL) {
 		struct ARC_DriverDef *def = mount->u1.resource->driver;
 
-		struct ARC_SuperDriverDef *sdef = def->driver;
-		if (sdef->create(use_path, info->mode, info->type, &hint) != 0) {
+		if (def->create(use_path, info->mode, info->type, &hint) != 0) {
 			free(use_path);
 			return NULL;
 		}
@@ -512,7 +517,7 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node
 
 char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNodeInfo *info, struct ARC_VFSNode **end) {
 	if (filepath == NULL || start == NULL || info == NULL) {
-		ARC_DEBUG(ERR, "Cannot create %s, imporper parameters (%p %p %p)\n", filepath, filepath, start ,info);
+		ARC_DEBUG(ERR, "Cannot create %s, imporper parameters (%p %p)\n", filepath, start ,info);
 		return NULL;
 	}
 
@@ -525,7 +530,7 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 	(void)args;
 
 	if (node == NULL || comp == NULL || comp_len == 0) {
-		ARC_DEBUG(ERR, "Cannot load %s, improper arguments (%p %p %d)\n", mount_path, node, comp, comp_len);
+		ARC_DEBUG(ERR, "Cannot load %s, improper arguments (%p %s %lu)\n", mount_path, node, comp, comp_len);
 		return NULL;
 	}
 
@@ -563,8 +568,7 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 		struct ARC_VFSNodeInfo info = { .driver_index = (uint64_t)-1, .type = vfs_mode2type(stat.st_mode) };
 		vfs_infer_driver(mount, &info);
 
-		struct ARC_SuperDriverDef *sdef = def->driver;
-		info.driver_arg = sdef->locate(mount->u1.resource, use_path, use_hint);
+		info.driver_arg = def->locate(mount->u1.resource, use_path, use_hint);
 		ret = vfs_create_node(node, comp, comp_len, &info);
 	} else {
 		struct ARC_VFSNodeInfo info = { .type = ARC_VFS_N_DIR, .driver_index = (uint64_t)-1 };
@@ -579,7 +583,7 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, 
 
 char *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNode **end) {
 	if (filepath == NULL || start == NULL) {
-		ARC_DEBUG(ERR, "Cannot create %s, improper parameters (%p %p)", filepath, start);
+		ARC_DEBUG(ERR, "Cannot load %s, improper parameters (%p)", filepath, start);
 		return NULL;
 	}
 
@@ -590,7 +594,7 @@ char *vfs_load_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flag
 
 char *vfs_traverse_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNode **end) {
 	if (filepath == NULL) {
-		ARC_DEBUG(ERR, "Cannot traverse %s\n");
+		ARC_DEBUG(ERR, "Cannot traverse %s\n", filepath);
 		return NULL;
 	}
 
