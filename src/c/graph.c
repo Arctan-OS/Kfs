@@ -33,6 +33,14 @@
 #include <global.h>
 #include <drivers/dri_defs.h>
 
+struct callback_args {
+	struct ARC_VFSNode *node;
+	char *comp;
+	char *mount_path;
+	void *caller_args;
+	size_t comp_len;
+};
+
 static int vfs_mode2type(mode_t mode) {
 	switch (mode & S_IFMT) {
 		case S_IFDIR: {
@@ -73,26 +81,22 @@ static int vfs_type2stat(int type) {
 	}
 }
 
-static uint64_t vfs_type2dri_index(struct ARC_VFSNode *mount, int type) {
-	if (type == ARC_VFS_N_DIR) {
-		return 0;
-	}
-
-	if (mount == NULL) {
-		return ARC_DRIDEF_BUFFER_FILE;
-	}
-
-	return mount->u1.resource->dri_index + 1;
-}
-
 static int vfs_infer_driver(struct ARC_VFSNode *mount, struct ARC_VFSNodeInfo *info) {
 	if (info == NULL) {
 		ARC_DEBUG(ERR, "Failed to infer driver, no information provided\n");
 		return -1;
 	}
 
-	if (info->driver_index == (uint64_t)-1) {
-		info->driver_index = vfs_type2dri_index(mount, info->type);
+	if (info->driver_index != (uint64_t)-1) {
+		return 0;
+	}
+
+	if (mount == NULL) {
+		info->driver_index = ARC_DRIDEF_BUFFER_FILE - (info->type == ARC_VFS_N_DIR);
+	} else if (info->type == ARC_VFS_N_DIR) {
+		info->driver_index = mount->resource->dri_index + 1;
+	} else {
+		info->driver_index = mount->resource->dri_index + 2;
 	}
 
 	return 0;
@@ -124,16 +128,11 @@ int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
 	}
 
 	struct ARC_VFSNode *parent = node->parent;
-	void *ticket = ticket_lock(&parent->branch_lock);
-	if (ticket == NULL) {
-		ARC_DEBUG(ERR, "Failed to lock node\n");
-		return -4;
-	}
-	ticket_lock_yield(ticket);
+	mutex_lock(&parent->branch_lock);
 
 	if (node->ref_count > 0) {
 		ARC_DEBUG(ERR, "Node is still in use\n");
-		ticket_unlock(ticket);
+		mutex_unlock(&parent->branch_lock);
 
 		return -5;
 	}
@@ -152,15 +151,14 @@ int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
 		ARC_ATOMIC_DEC(node->link->ref_count);
 	}
 
-	if (node->type != ARC_VFS_N_DIR && node->u1.resource != NULL) {
-		uninit_resource(node->u1.resource);
-	} else if (node->type == ARC_VFS_N_DIR && node->u1.hint != NULL) {
-		free(node->u1.hint);
+	if (node->resource != NULL) {
+		uninit_resource(node->resource);
 	}
 
 	if (node->mount != NULL && MASKED_READ(flags, 1, 1) == 1) {
-		struct ARC_DriverDef *def = node->mount->u1.resource->driver;
-		def->remove(parent->u1.hint == NULL ? vfs_get_path_from_nodes(node->mount, node) : node->name, parent->u1.hint);
+		struct ARC_DriverDef *def = parent->resource == NULL ? node->mount->resource->driver : parent->resource->driver;
+		// TODO: Consider if def->remove fails
+		def->remove(parent->resource == NULL ? vfs_get_path_from_nodes(node->mount, node) : node->name);
 	}
 
 	ARC_DEBUG(INFO, "Deleted node, \"%s\", successfully\n", node->name);
@@ -168,7 +166,7 @@ int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
 	free(node->name);
 	free(node);
 
-	ticket_unlock(ticket);
+	mutex_unlock(&parent->branch_lock);
 
 	if (MASKED_READ(flags, 0, 1) == 1) {
 		node = parent;
@@ -227,18 +225,14 @@ struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size
 
 	memset(node, 0, sizeof(*node));
 
-	node->mount = parent->mount;
-
-	if (parent->type == ARC_VFS_N_MOUNT) {
-		node->mount = parent;
-	}
-
 	node->type = info->type;
 
+	node->mount = (parent->type == ARC_VFS_N_MOUNT) ? parent : parent->mount;
+
 	if (info->resource_overwrite == NULL) {
-		node->u1.resource = init_resource(info->driver_index, info->driver_arg);
+		node->resource = init_resource(info->driver_index, info->driver_arg);
 	} else {
-		node->u1.resource = info->resource_overwrite;
+		node->resource = info->resource_overwrite;
 	}
 
 	node->name = strndup(name, name_len);
@@ -254,11 +248,11 @@ struct ARC_VFSNode *vfs_create_node(struct ARC_VFSNode *parent, char *name, size
 
 	parent->children = node;
 
-	if (node->u1.resource != NULL) {
-		node->u1.resource->driver->stat(node->u1.resource, NULL, &node->stat, NULL);
+	if (node->resource != NULL) {
+		node->resource->driver->stat(node->resource, NULL, &node->stat);
+	} else {
+		node->stat.st_mode = (info->mode & 00777) | vfs_type2stat(info->type);
 	}
-
-	node->stat.st_mode = (info->mode & 00777) | vfs_type2stat(info->type);
 
 	return node;
 }
@@ -316,11 +310,13 @@ static char *vfs_read_link(struct ARC_VFSNode *link) {
 	struct ARC_File fake = { .mode = ARC_STD_PERM, .node = link };
 
 	if (vfs_read(path, 1, link->stat.st_size, &fake) != (size_t)link->stat.st_size) {
+		ARC_DEBUG(ERR, "Failed to read in link\n");
 		free(path);
 		return NULL;
 	}
 
 	if (*path == 0) {
+		ARC_DEBUG(ERR, "Link path terminates early\n");
 		free(path);
 		return NULL;
 	}
@@ -329,14 +325,15 @@ static char *vfs_read_link(struct ARC_VFSNode *link) {
 }
 
 static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNode **end,
-				   struct ARC_VFSNode *(*callback)(struct ARC_VFSNode *, char *, size_t, char *, void *),
-				   void *callback_args) {
+				   struct ARC_VFSNode *(*callback)(struct callback_args *args),
+				   void *caller_args) {
 	// Flags:
 	//  Bit | Description
 	//  0   | 1: Resolve links
 	//  1   | 1: Ignore last component
 	size_t lnk_counter = 0;
 	struct ARC_VFSNode *org_node = NULL;
+
 
         re_iter:;
 
@@ -345,15 +342,22 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 	}
 
 	struct ARC_VFSNode *node = start;
+	ARC_ATOMIC_INC(node->ref_count);
+
 	struct ARC_VFSNode *next = NULL;
 
 	uint32_t is_last = 0;
 	char *comp_base = *filepath == '/' ? filepath + 1 : filepath;
 	char *comp_end = vfs_path_get_next_component(comp_base, &is_last);
-	char *mount_path = NULL;
 	size_t comp_len = (size_t)comp_end - (size_t)comp_base;
 
-	ARC_ATOMIC_INC(node->ref_count);
+	struct callback_args args = {
+	        .caller_args = caller_args,
+		.comp = comp_base,
+		.comp_len = comp_len,
+		.mount_path = NULL,
+		.node = node,
+        };
 
 	while (comp_end != NULL) {
 		if (MASKED_READ(flags, 1, 1) == 1 && is_last == 1) {
@@ -361,7 +365,7 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 		}
 
 		if (node->type == ARC_VFS_N_MOUNT) {
-			mount_path = comp_base;
+			args.mount_path = comp_base;
 		}
 
 		if (strncmp(comp_base, "..", comp_len) == 0) {
@@ -372,8 +376,7 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 			goto next_iter;
 		}
 
-		void *ticket = ticket_lock(&node->branch_lock);
-		ticket_lock_yield(ticket);
+		mutex_lock(&node->branch_lock);
 
 		struct ARC_VFSNode *children = node->children;
 		while (children != NULL) {
@@ -387,10 +390,10 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 		next = children;
 
 		if (callback != NULL && next == NULL) {
-			next = callback(node, comp_base, comp_len, mount_path, callback_args);
+			next = callback(&args);
 		}
 
-		ticket_unlock(ticket);
+		mutex_unlock(&node->branch_lock);
 
 		if (next == NULL) {
 			ARC_DEBUG(ERR, "Quiting traversal of %s, no next node found\n", filepath);
@@ -415,6 +418,10 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 		comp_base = *comp_end == '/' ? comp_end + 1 : comp_end; // Skip over /
 		comp_end = vfs_path_get_next_component(comp_base, &is_last);
 		comp_len = (size_t)comp_end - (size_t)comp_base;
+
+		args.comp = comp_base;
+		args.comp_len = comp_len;
+		args.node = node;
 
 		next = NULL;
 	}
@@ -465,54 +472,47 @@ static char *internal_vfs_traverse(char *filepath, struct ARC_VFSNode *start, ui
 	return ret;
 }
 
-static struct ARC_VFSNode *callback_vfs_create_filepath(struct ARC_VFSNode *node, char *comp, size_t comp_len, char *mount_path, void *args) {
-	if (node == NULL || comp == NULL || comp_len == 0 || args == NULL) {
-		ARC_DEBUG(ERR, "Quiting create callback, improper parameters (%p %s %lu %p)\n", node, comp, comp_len, args);
+static struct ARC_VFSNode *callback_vfs_create_filepath(struct callback_args *args) {
+	if (args->node == NULL || args->comp == NULL || args->comp_len == 0 || args->caller_args == NULL) {
+		ARC_DEBUG(ERR, "Quiting create callback, improper parameters (%p %s %lu %p)\n", args->node, args->comp, args->comp_len, args->caller_args);
 		return NULL;
 	}
 
 	struct ARC_VFSNodeInfo local_info = { .type = ARC_VFS_N_DIR, .driver_index = (uint64_t)-1 };
-	struct ARC_VFSNodeInfo *info = (struct ARC_VFSNodeInfo *)args;
-	struct ARC_VFSNode *ret = NULL;
+	struct ARC_VFSNodeInfo *info = (struct ARC_VFSNodeInfo *)args->caller_args;
 
-	struct ARC_VFSNode *mount = node->mount;
-	if (node->type == ARC_VFS_N_MOUNT) {
-		mount = node;
+	struct ARC_VFSNode *mount = args->node->mount;
+	if (args->node->type == ARC_VFS_N_MOUNT) {
+		mount = args->node;
 	}
 
-	char *use_path = strndup(comp, comp_len);
-	void *use_hint = node->u1.hint;
-	if (use_hint == NULL && mount_path != NULL) {
-		free(use_path);
-		use_path = strndup(mount_path, (uintptr_t)comp - (uintptr_t)mount_path + comp_len);
-	}
-
-	void *hint = node->u1.hint;
-
-	if (comp[comp_len] == 0) {
-		vfs_infer_driver(mount, info);
-	} else {
+	if (args->comp[args->comp_len] != 0) {
 		info = &local_info;
 	}
 
-	if (mount != NULL) {
-		struct ARC_DriverDef *def = mount->u1.resource->driver;
+	vfs_infer_driver(mount, info);
 
-		if (def->create(use_path, info->mode, info->type, &hint) != 0) {
+	if (mount != NULL) {
+		struct ARC_DriverDef *def = NULL;
+		char *use_path = NULL;
+
+		if (args->node->resource != NULL) {
+			def = args->node->resource->driver;
+			use_path = strndup(args->comp, args->comp_len);
+		} else {
+			def = mount->resource->driver;
+			use_path = strndup(args->mount_path, (uintptr_t)args->comp - (uintptr_t)args->mount_path + args->comp_len);
+		}
+
+		if (def->create(use_path, info->mode, info->type) != 0) {
 			free(use_path);
 			return NULL;
 		}
+
+		free(use_path);
 	}
 
-	free(use_path);
-
-	ret = vfs_create_node(node, comp, comp_len, info);
-
-	if (info->type == ARC_VFS_N_DIR) {
-		ret->u1.hint = hint;
-	}
-
-	return ret;
+	return vfs_create_node(args->node, args->comp, args->comp_len, info);
 }
 
 char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t flags, struct ARC_VFSNodeInfo *info, struct ARC_VFSNode **end) {
@@ -526,54 +526,52 @@ char *vfs_create_filepath(char *filepath, struct ARC_VFSNode *start, uint32_t fl
 	return internal_vfs_traverse(filepath, start, flags | 1, end, callback_vfs_create_filepath, (void *)info);
 }
 
-static struct ARC_VFSNode *callback_vfs_load_filepath(struct ARC_VFSNode *node, char *comp, size_t comp_len, char *mount_path, void *args) {
-	(void)args;
-
-	if (node == NULL || comp == NULL || comp_len == 0) {
-		ARC_DEBUG(ERR, "Cannot load %s, improper arguments (%p %s %lu)\n", mount_path, node, comp, comp_len);
+static struct ARC_VFSNode *callback_vfs_load_filepath(struct callback_args *args) {
+	if (args->node == NULL || args->comp == NULL || args->comp_len == 0) {
+		ARC_DEBUG(ERR, "Cannot load, improper arguments (%p %s %lu)\n", args->node, args->comp, args->comp_len);
 		return NULL;
 	}
 
-	struct ARC_VFSNode *ret = NULL;
 
-	struct ARC_VFSNode *mount = node->mount;
-	if (node->type == ARC_VFS_N_MOUNT) {
-		mount = node;
+	struct ARC_VFSNode *mount = args->node->mount;
+	if (args->node->type == ARC_VFS_N_MOUNT) {
+		mount = args->node;
 	}
 
 	if (mount == NULL) {
 		// There is no mount so there is no reason to stat
-		ARC_DEBUG(ERR, "No mountpoint found, quiting load of %s\n", comp);
+		ARC_DEBUG(ERR, "No mountpoint found, quiting load of %s\n", args->comp);
 		return NULL;
 	}
 
-	char *use_path = strndup(comp, comp_len);
-	void *use_hint = node->u1.hint;
-	if (use_hint == NULL && mount_path != NULL) {
-		free(use_path);
-		use_path = strndup(mount_path, (uintptr_t)comp - (uintptr_t)mount_path + comp_len);
+	struct ARC_Resource *res = NULL;
+	char *use_path = NULL;
+
+	if (args->node->resource != NULL) {
+		res = args->node->resource;
+		use_path = strndup(args->comp, args->comp_len);
+	} else {
+		res = mount->resource;
+		use_path = strndup(args->mount_path, (uintptr_t)args->comp - (uintptr_t)args->mount_path + args->comp_len);
 	}
 
-	struct ARC_DriverDef *def = mount->u1.resource->driver;
-	struct stat stat = { 0 };
-	void *hint = NULL;
+	struct ARC_DriverDef *def = res->driver;
 
-	if (def->stat(mount->u1.resource, use_path, &stat, &hint) != 0) {
+	struct stat stat = { 0 };
+	if (def->stat(res, use_path, &stat) != 0) {
 		ARC_DEBUG(ERR, "%s does not exist on the physical filesystem\n", use_path);
 		free(use_path);
 		return NULL;
 	}
 
-	if (comp[comp_len] == 0) {
-		struct ARC_VFSNodeInfo info = { .driver_index = (uint64_t)-1, .type = vfs_mode2type(stat.st_mode) };
-		vfs_infer_driver(mount, &info);
+	struct ARC_VFSNodeInfo info = { .driver_index = (uint64_t)-1, .type = vfs_mode2type(stat.st_mode) };
+	vfs_infer_driver(mount, &info);
 
-		info.driver_arg = def->locate(mount->u1.resource, use_path, use_hint);
-		ret = vfs_create_node(node, comp, comp_len, &info);
-	} else {
-		struct ARC_VFSNodeInfo info = { .type = ARC_VFS_N_DIR, .driver_index = (uint64_t)-1 };
-		ret = vfs_create_node(node, comp, comp_len, &info);
-		ret->u1.hint = hint;
+	info.driver_arg = def->locate(res, use_path);
+	struct ARC_VFSNode *ret = vfs_create_node(args->node, args->comp, args->comp_len, &info);
+
+	if (ret->resource == NULL) {
+		memcpy(&ret->stat, &stat, sizeof(stat));
 	}
 
 	free(use_path);

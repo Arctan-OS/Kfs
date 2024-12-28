@@ -52,10 +52,9 @@
  * A single node in a VFS tree.
  * */
 struct ARC_VFSNode {
+	struct ARC_VFSNode *mount;
 	/// Pointer to the link.
 	struct ARC_VFSNode *link;
-	/// Pointer to the mount structure this node is or is under.
-	struct ARC_VFSNode *mount;
 	/// Pointer to the parent of the current node.
 	struct ARC_VFSNode *parent;
 	/// Pointer to the head of the children linked list.
@@ -65,22 +64,17 @@ struct ARC_VFSNode {
 	/// Pointer to the previous element in the current linked list.
 	// TODO: There is no real need for this, can probably just be removed
 	struct ARC_VFSNode *prev;
-	/// Lock on branching of this node (link, parent, children, next, prev, name)
-	struct ARC_TicketLock branch_lock;
-	union {
-		// Is an ARC_Resource in the event type != ARC_VFS_N_DIR
-		struct ARC_Resource *resource;
-		void *hint;
-	} u1;
+	struct ARC_Resource *resource;
 	/// The name of this node.
 	char *name;
 	/// Number of references to this node (> 0 means node and children cannot be destroyed).
 	uint64_t ref_count;
-	/// Lock on the properties of this node (type, mount, stat, is_open)
+	/// Lock on branching of this node (link, parent, children, next, prev, name)
+	ARC_GenericMutex branch_lock;
+	/// Lock on the properties of this node (type, stat)
 	ARC_GenericMutex property_lock;
 	/// The type of node.
 	int type;
-	bool is_open;
 	// Stat
 	struct stat stat;
 };

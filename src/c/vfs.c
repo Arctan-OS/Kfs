@@ -55,7 +55,7 @@ static struct ARC_VFSNode *vfs_get_starting_node(char *filepath) {
 int init_vfs() {
 	vfs_root.type = ARC_VFS_N_DIR;
 	vfs_root.name = "";
-	init_static_ticket_lock(&vfs_root.branch_lock);
+	init_static_mutex(&vfs_root.branch_lock);
 	init_static_mutex(&vfs_root.property_lock);
 	init_static_spinlock(&vfs_node_cache_lock);
 
@@ -99,7 +99,7 @@ int vfs_mount(char *mountpoint, struct ARC_Resource *resource) {
 	mutex_lock(&node->property_lock);
 
 	node->type = ARC_VFS_N_MOUNT;
-	node->u1.resource = resource;
+	node->resource = resource;
 
 	mutex_unlock(&node->property_lock);
 
@@ -122,7 +122,7 @@ int vfs_unmount(struct ARC_VFSNode *node) {
 	mutex_lock(&node->property_lock);
 
 	node->type = ARC_VFS_N_MOUNT;
-	node->u1.resource = NULL;
+	node->resource = NULL;
 
 	mutex_unlock(&node->property_lock);
 
@@ -212,12 +212,7 @@ size_t vfs_read(void *buffer, size_t size, size_t count, struct ARC_File *file) 
 		internal_desc.node = node;
 	}
 
-	if (node->type == ARC_VFS_N_LINK) {
-		ARC_ATOMIC_DEC(file->ref_count);
-		return 0;
-	}
-
-	struct ARC_Resource *res = node->u1.resource;
+	struct ARC_Resource *res = node->resource;
 
 	if (res == NULL) {
 		ARC_ATOMIC_DEC(file->ref_count);
@@ -255,12 +250,7 @@ size_t vfs_write(void *buffer, size_t size, size_t count, struct ARC_File *file)
 		internal_desc.node = node;
 	}
 
-	if (node->type == ARC_VFS_N_LINK) {
-		ARC_ATOMIC_DEC(file->ref_count);
-		return 0;
-	}
-
-	struct ARC_Resource *res = node->u1.resource;
+	struct ARC_Resource *res = node->resource;
 
 	if (res == NULL) {
 		ARC_ATOMIC_DEC(file->ref_count);
@@ -375,7 +365,7 @@ int vfs_stat(char *filepath, struct stat *stat) {
 		return -3;
 	}
 
-	int ret = node->u1.resource->driver->stat(node->u1.resource, NULL, stat, NULL);
+	int ret = node->resource->driver->stat(node->resource, NULL, stat);
 
 	ARC_ATOMIC_DEC(node->ref_count);
 
@@ -492,15 +482,13 @@ int vfs_link(char *a, char *b, int32_t mode) {
 		return -6;
 	}
 
-	void *ticket = ticket_lock(&node_b->branch_lock);
-	ticket_lock_yield(ticket);
-	node_b->link = node_a;
-
-	ticket_unlock(ticket);
-
 	struct ARC_File fake = { .node = node_b };
 	char *rel_path = vfs_get_path(b, a);
 	vfs_write(rel_path, 1, strlen(rel_path), &fake);
+
+	mutex_lock(&node_b->branch_lock);
+	node_b->link = node_a;
+	mutex_unlock(&node_b->branch_lock);
 
 	ARC_ATOMIC_DEC(node_b->ref_count);
 
@@ -586,13 +574,9 @@ int vfs_rename(char *a, char *b) {
 		return -7;
 	}
 
-	void *ticket_parent = ticket_lock(&node_a->parent->branch_lock);
-	void *ticket_b = ticket_lock(&node_b->branch_lock);
-	ticket_lock_yield(ticket_parent);
-	ticket_lock_yield(ticket_b);
-
 	// TODO: Tell the drivers about this
 	// TODO: What if A and B are on different mount points?
+	mutex_lock(&node_a->parent->branch_lock);
 
 	if (node_a->prev != NULL) {
 		// Update Node A's prev->next pointer
@@ -607,7 +591,11 @@ int vfs_rename(char *a, char *b) {
 		node_a->next->prev = node_a->prev;
 	}
 
+	mutex_unlock(&node_a->parent->branch_lock);
+
 	// Update Node B's linked list
+	mutex_lock(&node_b->branch_lock);
+
 	if (node_b->children != NULL) {
 		node_b->children->prev = node_a;
 	}
@@ -616,14 +604,7 @@ int vfs_rename(char *a, char *b) {
 	node_b->children = node_a;
 	node_a->parent = node_b;
 
-	ticket_unlock(ticket_b);
-	ticket_unlock(ticket_parent);
-
-	if (node_a->type == ARC_VFS_N_LINK) {
-		struct ARC_File fake = { .node = node_b };
-		char *rel_path = vfs_get_path_from_nodes(node_b, node_a);
-		vfs_write(rel_path, 1, strlen(rel_path), &fake);
-	}
+	mutex_unlock(&node_b->branch_lock);
 
 	ARC_ATOMIC_DEC(node_a->ref_count);
 	ARC_ATOMIC_DEC(node_b->ref_count);
