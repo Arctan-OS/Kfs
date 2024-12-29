@@ -570,7 +570,7 @@ static struct ARC_VFSNode *callback_vfs_load_filepath(struct callback_args *args
 	info.driver_arg = def->locate(res, use_path);
 	struct ARC_VFSNode *ret = vfs_create_node(args->node, args->comp, args->comp_len, &info);
 
-	if (ret->resource == NULL) {
+	if (ret != NULL && ret->resource == NULL) {
 		memcpy(&ret->stat, &stat, sizeof(stat));
 	}
 
