@@ -5,7 +5,7 @@
  *
  * @LICENSE
  * Arctan - Operating System Kernel
- * Copyright (C) 2023-2024 awewsomegamer
+ * Copyright (C) 2023-2025 awewsomegamer
  *
  * This file is part of Arctan.
  *
