@@ -180,7 +180,6 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	memset(file, 0, sizeof(*file));
 
 	file->mode = mode;
-	file->flags = flags;
 	file->node = node;
 
 	*ret = file;
