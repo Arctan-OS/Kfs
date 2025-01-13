@@ -158,7 +158,8 @@ int vfs_delete_node(struct ARC_VFSNode *node, uint32_t flags) {
 	if (node->mount != NULL && MASKED_READ(flags, 1, 1) == 1) {
 		struct ARC_DriverDef *def = parent->resource == NULL ? node->mount->resource->driver : parent->resource->driver;
 		// TODO: Consider if def->remove fails
-		def->remove(parent->resource == NULL ? vfs_get_path_from_nodes(node->mount, node) : node->name);
+		def->remove(parent->resource == NULL ? node->mount->resource : parent->resource,
+			    parent->resource == NULL ? vfs_get_path_from_nodes(node->mount, node) : node->name);
 	}
 
 	ARC_DEBUG(INFO, "Deleted node, \"%s\", successfully\n", node->name);
@@ -493,18 +494,18 @@ static struct ARC_VFSNode *callback_vfs_create_filepath(struct callback_args *ar
 	vfs_infer_driver(mount, info);
 
 	if (mount != NULL) {
-		struct ARC_DriverDef *def = NULL;
+		struct ARC_Resource *res = NULL;
 		char *use_path = NULL;
 
 		if (args->node->resource != NULL) {
-			def = args->node->resource->driver;
+			res = args->node->resource;
 			use_path = strndup(args->comp, args->comp_len);
 		} else {
-			def = mount->resource->driver;
+			res = mount->resource;
 			use_path = strndup(args->mount_path, (uintptr_t)args->comp - (uintptr_t)args->mount_path + args->comp_len);
 		}
 
-		if (def->create(use_path, info->mode, info->type) != 0) {
+		if (res->driver->create(res, use_path, info->mode, info->type) != 0) {
 			free(use_path);
 			return NULL;
 		}
