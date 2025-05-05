@@ -63,6 +63,8 @@ int init_vfs() {
 	//       delete the root node
 	ARC_ATOMIC_INC(vfs_root.ref_count);
 
+	ARC_DEBUG(INFO, "Initialized VFS\n");
+
 	return 0;
 }
 
