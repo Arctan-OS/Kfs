@@ -29,11 +29,12 @@
 #ifndef ARC_VFS_GRAPH_H
 #define ARC_VFS_GRAPH_H
 
+#include "fs/vfs.h"
+
 #include <stdbool.h>
-#include <fs/vfs.h>
 
 /**
- * Deletes a
+ * Deletes a node
  *
  * Flags:
  *  Bit | Description

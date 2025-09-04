@@ -40,13 +40,12 @@
 #define ARC_VFS_N_FIFO  7
 #define ARC_VFS_N_DEV   8
 
-#include <stddef.h>
+#define ARC_STD_PERM 0700
+
+#include "drivers/resource.h"
+#include "lib/mutex.h"
+
 #include <stdint.h>
-#include <sys/stat.h>
-#include <lib/resource.h>
-#include <lib/atomics.h>
-#include <stdbool.h>
-#include <abi-bits/seek-whence.h>
 
 /**
  * A single node in a VFS tree.
@@ -70,9 +69,9 @@ struct ARC_VFSNode {
 	/// Number of references to this node (> 0 means node and children cannot be destroyed).
 	uint64_t ref_count;
 	/// Lock on branching of this node (link, parent, children, next, prev, name)
-	ARC_GenericMutex branch_lock;
+	ARC_Mutex branch_lock;
 	/// Lock on the properties of this node (type, stat)
-	ARC_GenericMutex property_lock;
+	ARC_Mutex property_lock;
 	/// The type of node.
 	int type;
 	// Stat
@@ -199,5 +198,13 @@ int vfs_list(char *path, int recurse);
  * Get the path from B to A.
  * */
 char *vfs_get_path(char *a, char *b);
+/**
+ * Check the requested permissions against the permissions of the file.
+ *
+ * @param struct stat *stat - The permissions of the file.
+ * @param uint32_t requested - Requested permissions (mode).
+ * @return Zero if the current program has requested privelleges.
+ * */
+int vfs_check_perms(struct stat *stat, uint32_t requested);
 
 #endif

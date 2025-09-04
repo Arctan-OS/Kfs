@@ -25,13 +25,12 @@
  * @DESCRIPTION
  * The manager of the VFS's node graph.
 */
-#include <fs/graph.h>
-#include <fs/vfs.h>
-#include <mm/allocator.h>
-#include <lib/util.h>
-#include <lib/perms.h>
-#include <global.h>
-#include <drivers/dri_defs.h>
+#include "drivers/dri_defs.h"
+#include "fs/graph.h"
+#include "global.h"
+#include "lib/util.h"
+#include "mm/allocator.h"
+#include "util.h"
 
 struct callback_args {
 	struct ARC_VFSNode *node;

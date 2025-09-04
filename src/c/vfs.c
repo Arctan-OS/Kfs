@@ -24,15 +24,14 @@
  *
  * @DESCRIPTION
 */
-#include <fs/vfs.h>
-#include <fs/graph.h>
-#include <abi-bits/seek-whence.h>
-#include <abi-bits/fcntl.h>
-#include <global.h>
-#include <mm/allocator.h>
-#include <lib/util.h>
-#include <lib/resource.h>
-#include <lib/ringbuffer.h>
+#include "abi-bits/fcntl.h"
+#include "abi-bits/seek-whence.h"
+#include "fs/graph.h"
+#include "fs/vfs.h"
+#include "global.h"
+#include "lib/spinlock.h"
+#include "lib/util.h"
+#include "mm/allocator.h"
 
 #define NODE_CACHE_SIZE 1024
 
@@ -40,7 +39,7 @@ static struct ARC_VFSNode vfs_root = { 0 };
 
 static struct ARC_VFSNode *vfs_node_cache[1024] = { 0 };
 static uint64_t vfs_node_cache_idx = 0;
-static ARC_GenericSpinlock vfs_node_cache_lock = 0;
+static ARC_Spinlock vfs_node_cache_lock = 0;
 
 static struct ARC_VFSNode *vfs_get_starting_node(char *filepath) {
 	if (*filepath == '/') {
@@ -173,7 +172,7 @@ int vfs_open(char *path, int flags, uint32_t mode, struct ARC_File **ret) {
 	struct ARC_File *file = (struct ARC_File *)alloc(sizeof(*file));
 
 	if (file == NULL) {
-		ticket_unlock(&node->branch_lock);
+		mutex_unlock(&node->branch_lock);
 		ARC_ATOMIC_DEC(node->ref_count);
 
 		return -5;
@@ -714,4 +713,24 @@ char *vfs_get_path(char *a, char *b) {
 	sprintf(path + (dot_dots * 3), "%s", b + delta + 1);
 
 	return path;
+}
+
+int vfs_check_perms(struct stat *stat, uint32_t requested) {
+	uint32_t UID = 0;
+	uint32_t GID = 0;
+
+	if (UID == 0) {
+		// ROOT CAN DO WHATEVER!!!!
+		return 0;
+	}
+
+	if (stat->st_uid == UID) {
+		return (stat->st_mode ^ requested) & ((requested >> 6) & 07);
+	}
+
+	if (stat->st_gid == GID) {
+		return (stat->st_mode ^ requested) & ((requested >> 3) & 07);
+	}
+
+	return (stat->st_mode ^ requested) & (requested & 07);
 }
