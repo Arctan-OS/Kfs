@@ -46,6 +46,7 @@
 #include "lib/mutex.h"
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /**
  * A single node in a VFS tree.
