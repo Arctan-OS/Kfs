@@ -39,7 +39,7 @@ static struct ARC_VFSNode vfs_root = { 0 };
 
 static struct ARC_VFSNode *vfs_node_cache[1024] = { 0 };
 static uint64_t vfs_node_cache_idx = 0;
-static ARC_Spinlock vfs_node_cache_lock = 0;
+static ARC_Spinlock vfs_node_cache_lock;
 
 static struct ARC_VFSNode *vfs_get_starting_node(char *filepath) {
 	if (*filepath == '/') {
