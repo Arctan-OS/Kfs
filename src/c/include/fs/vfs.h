@@ -37,10 +37,19 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+enum {
+        ARC_VFS_TYPE_NULL = 0,
+	ARC_VFS_TYPE_FILE,
+	ARC_VFS_TYPE_DIR,
+	ARC_VFS_TYPE_MOUNT,
+}
+
 typedef struct ARC_VFSGraphData {
 	ARC_Resource *resource;
 	// ARC_GraphNode *mount; // Is this needed?
 	ARC_GraphNode *link;
+	ARC_GraphNode *mount;
+	int type;
 	struct stat stat;
 } ARC_VFSGraphData;
 
