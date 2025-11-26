@@ -42,11 +42,15 @@ enum {
 	ARC_VFS_TYPE_FILE,
 	ARC_VFS_TYPE_DIR,
 	ARC_VFS_TYPE_MOUNT,
-}
+	ARC_VFS_TYPE_ROOT,
+	ARC_VFS_TYPE_LINK,
+	ARC_VFS_TYPE_BUFF,
+	ARC_VFS_TYPE_FIFO,
+	ARC_VFS_TYPE_DEV,
+};
 
 typedef struct ARC_VFSGraphData {
 	ARC_Resource *resource;
-	// ARC_GraphNode *mount; // Is this needed?
 	ARC_GraphNode *link;
 	ARC_GraphNode *mount;
 	int type;
@@ -62,7 +66,7 @@ size_t vfs_write(void *buffer, size_t size, size_t count, ARC_File *file);
 int vfs_seek(ARC_File *file, long offset, int whence);
 int vfs_close(ARC_File *file);
 int vfs_stat(char *path, struct stat *stat);
-int vfs_create(char *path, uint32_t mode, int64_t dri_idx, void *dri_arg);
+int vfs_create(char *path, uint32_t mode);
 int vfs_remove(char *path);
 int vfs_link(char *dest, char *targ, uint32_t mode);
 int vfs_rename(char *to, char *from);

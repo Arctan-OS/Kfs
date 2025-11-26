@@ -45,25 +45,24 @@ static ARC_GraphNode *vfs_node_cache[1024] = { 0 };
 static uint64_t vfs_node_cache_idx = 0;
 static ARC_Spinlock vfs_node_cache_lock;
 
-int init_vfs() {
-	root = init_base_graph(sizeof(ARC_VFSGraphData));
-
-	if (root == NULL) {
-		return -1;
+static ARC_GraphNode *vfs_get_root(char *path) {
+	if (*path == '/') {
+		return root;
 	}
 
-	init_static_spinlock(&vfs_node_cache_lock);
-
-	return 0;
+	// TODO: if a process is running { root = pwd };
+	return NULL;
 }
 
 struct create_callback_args {
+	uint32_t mode;
 	bool create;
 };
 
 // Will load and create (if requested) if the directories or end file or directory does not exist
-static ARC_GraphNode *create_callback(ARC_GraphNode *parent, char *name, char *remaining, void *_arg) {
+static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, char *remaining, void *_arg) {
 	struct create_callback_args *arg = _arg;
+
 	ARC_GraphNode *node = graph_create(sizeof(ARC_VFSGraphData));
 
 	if (node == NULL) {
@@ -94,7 +93,7 @@ static ARC_GraphNode *create_callback(ARC_GraphNode *parent, char *name, char *r
 			goto epic_fail;
 		}
 
-		// TODO: Create the file
+		// TODO: Create the node
 	}
 
 	void *dri_arg = mount_res->driver->locate(mount_res, path);
@@ -119,6 +118,19 @@ static ARC_GraphNode *create_callback(ARC_GraphNode *parent, char *name, char *r
 	}
 
 	return NULL;
+}
+
+
+int init_vfs() {
+	root = init_base_graph(sizeof(ARC_VFSGraphData));
+
+	if (root == NULL) {
+		return -1;
+	}
+
+	init_static_spinlock(&vfs_node_cache_lock);
+
+	return 0;
 }
 
 int vfs_mount(char *mountpoint, ARC_Resource *resource) {
@@ -166,6 +178,7 @@ int vfs_unmount(char *mountpoint) {
 	if (graph_remove(node, true) != 0) {
 		ARC_DEBUG(ERR, "Failed to remove node from node graph\n");
 		// TODO: Try to continue to remove it, or insert it into cache?
+		ARC_HANG;
 	} else {
 		uninit_resource(res);
 		return 0;
@@ -180,12 +193,10 @@ int vfs_open(char *path, int flags, uint32_t mode, ARC_File **ret) {
 		return -1;
 	}
 
-	ARC_GraphNode *root = root;
+	ARC_GraphNode *root = vfs_get_root(path);
 
-	// TODO: if a process is running { root = pwd };
-
-	struct create_callback_args args = { .create = false };
-	ARC_GraphNode *node = path_traverse(root, path, create_callback, &args);
+	struct create_callback_args args = { .create = false, .mode = mode }; // .create will depend on flags
+	ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args);
 
 	if (node == NULL) {
 		ARC_DEBUG(ERR, "Failed to find node");
@@ -207,42 +218,342 @@ int vfs_open(char *path, int flags, uint32_t mode, ARC_File **ret) {
 }
 
 size_t vfs_read(void *buffer, size_t size, size_t count, ARC_File *file) {
-	return 0;
+	if (buffer == NULL || size == 0 || count == 0 || file == NULL) {
+		return 0;
+	}
+
+	ARC_GraphNode *node = file->node;
+	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+
+	ARC_File _file = { 0 };
+	memcpy(&_file, file, sizeof(*file));
+
+	if (data->link != NULL) {
+		node = data->link;
+		data = (ARC_VFSGraphData *)&node->arb;
+	}
+
+	_file.node = node;
+	ARC_Resource *res = data->resource;
+
+	return res->driver->read(buffer, size, count, file, res);
 }
 
 size_t vfs_write(void *buffer, size_t size, size_t count, ARC_File *file) {
-	return 0;
+	if (buffer == NULL || size == 0 || count == 0 || file == NULL) {
+		return 0;
+	}
+
+	ARC_GraphNode *node = file->node;
+	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+
+	ARC_File _file = { 0 };
+	memcpy(&_file, file, sizeof(*file));
+
+	if (data->link != NULL) {
+		node = data->link;
+		data = (ARC_VFSGraphData *)&node->arb;
+	}
+
+	_file.node = node;
+	ARC_Resource *res = data->resource;
+
+	return res->driver->read(buffer, size, count, file, res);
 }
 
 int vfs_seek(ARC_File *file, long offset, int whence) {
+	if (file == NULL) {
+		return 0;
+	}
+
+	ARC_GraphNode *node = file->node;
+	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+
+	if (data->link != NULL) {
+		node = data->link;
+		data = (ARC_VFSGraphData *)&node->arb;
+	}
+
+	long size = data->stat.st_size;
+
+	switch (whence) {
+		case SEEK_SET: {
+			if (0 <= offset && offset < size) {
+				file->offset = offset;
+			}
+
+			break;
+		}
+
+		case SEEK_CUR: {
+			if (0 <= file->offset + offset && file->offset + offset < size) {
+				file->offset += offset;
+			}
+
+			break;
+		}
+
+		case SEEK_END: {
+			if (0 <= size - offset - 1 && size - offset - 1 < size) {
+				file->offset = size - offset - 1;
+			}
+
+			break;
+		}
+	}
+
 	return 0;
 }
 
 int vfs_close(ARC_File *file) {
+	if (file == NULL) {
+		return -1;
+	}
+
+	ARC_GraphNode *node = file->node;
+	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+
+	if (data->type == ARC_VFS_TYPE_LINK) {
+		ARC_ATOMIC_DEC(data->link->ref_count);
+	}
+
+	ARC_GraphNode *mount = data->mount;
+
+	char *path_from_mount = path_get_abs(mount, node);
+
+	if (graph_remove(node, true) != 0) {
+		// TODO: Add to some sort of cache to try to remove again?
+	}
+
+	if (mount != NULL) {
+		data = (ARC_VFSGraphData *)&mount->arb;
+		ARC_Resource *res = data->resource;
+		res->driver->remove(res, path_from_mount); // TODO: Does it really matter if this fails?
+	}
+
+
 	return 0;
 }
 
 int vfs_stat(char *path, struct stat *stat) {
+	if (path == NULL || stat == NULL) {
+		return -1;
+	}
+
+	ARC_GraphNode *root = vfs_get_root(path);
+	struct create_callback_args args = { .create = false };
+	ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args);
+
+	if (node == NULL) {
+		return -2;
+	}
+
+	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+	ARC_Resource *res = data->resource;
+	res->driver->stat(res, NULL, &data->stat); // TODO: Does it really matter if this fails?
+	memcpy(stat, &data->stat, sizeof(*stat));
+
 	return 0;
 }
 
-int vfs_create(char *path, uint32_t mode, int64_t dri_idx, void *dri_arg) {
+int vfs_create(char *path, uint32_t mode) {
+	if (path == NULL || mode == 0) {
+		return -1;
+	}
+
+	ARC_GraphNode *root = vfs_get_root(path);
+	struct create_callback_args args = { .create = true };
+
+	if (path_traverse(root, path, vfs_create_callback, &args) == NULL) {
+		return -1;
+	}
+
 	return 0;
 }
 
 int vfs_remove(char *path) {
+	if (path == NULL) {
+		return -1;
+	}
+
+	ARC_GraphNode *root = vfs_get_root(path);
+	struct create_callback_args args = { .create = false };
+	ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args);
+
+	if (node == NULL) {
+		return -1;
+	}
+
+	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+	if (data->type == ARC_VFS_TYPE_LINK) {
+		ARC_ATOMIC_DEC(data->link->ref_count);
+	}
+
+	ARC_GraphNode *mount = data->mount;
+
+	char *path_from_mount = path_get_abs(mount, node);
+
+	if (graph_remove(node, true) != 0) {
+		// TODO: Add to some sort of cache to try to remove again?
+	}
+
+	if (mount != NULL) {
+		data = (ARC_VFSGraphData *)&mount->arb;
+		ARC_Resource *res = data->resource;
+		res->driver->remove(res, path_from_mount); // TODO: Does it really matter if this fails?
+	}
+
 	return 0;
 }
 
-int vfs_link(char *dest, char *targ, uint32_t mode) {
+int vfs_link(char *file, char *link, uint32_t mode) {
+	if (file == NULL || link == NULL) {
+		return -1;
+	}
+
+	ARC_GraphNode *root = vfs_get_root(file);
+	struct create_callback_args args = { .create = false };
+	ARC_GraphNode *_file = path_traverse(root, file, vfs_create_callback, &args);
+
+	if (_file == NULL) {
+		return -2;
+	}
+
+	ARC_GraphNode *root = vfs_get_root(link);
+	args.create = true;
+	ARC_GraphNode *_link = path_traverse(root, file, vfs_create_callback, &args);
+
+	if (_link == NULL) {
+		return -3;
+	}
+
+	ARC_ATOMIC_INC(_file->ref_count);
+	ARC_VFSGraphData *link_data = (ARC_VFSGraphData *)&_link->arb;
+	link_data->link = _file;
+	link_data->type = ARC_VFS_TYPE_LINK;
+
 	return 0;
 }
 
 int vfs_rename(char *to, char *from) {
+	if (from == NULL || to == NULL) {
+		return -1;
+	}
+
+	ARC_GraphNode *root = vfs_get_root(from);
+
+	struct create_callback_args args = { .create = false };
+	ARC_GraphNode *_from = path_traverse(root, from, vfs_create_callback, &args);
+
+	if (_from == NULL) {
+		return -2;
+	}
+
+	size_t to_len = strlen(to);
+	size_t i = to_len - 2;
+	for (; i > 0; i--) {
+		if (to[i] == '/') {
+			break;
+		}
+	}
+
+	char *parent_path = strndup(to, i + 1);
+	if (parent_path == NULL) {
+		return -3;
+	}
+
+	root = vfs_get_root(parent_path);
+	args.create = true;
+	ARC_GraphNode *parent = path_traverse(root, parent_path, vfs_create_callback, &args);
+	free(parent_path);
+
+	if (parent == NULL) {
+		return -4;
+	}
+
+	if (graph_remove(_from, false) != 0) {
+		return -5;
+	}
+
+	char *name = strdup(&to[i + 1]);
+	if (name == NULL) {
+		return -6;
+	}
+
+	size_t name_len = to_len - i;
+
+	if (name[name_len - 1] == '/') {
+		name[name_len - 1] = 0;
+	}
+
+	graph_add(parent, _from, name);
+
+	free(name);
+
+	return 0;
+}
+
+static int internal_vfs_list(ARC_GraphNode *node, int level, int org) {
+	if (node == NULL) {
+		return -1;
+	}
+
+	ARC_GraphNode *children = node->child;
+
+	if (children == NULL) {
+		return 0;
+	}
+
+	const char *names[] = {
+	        [ARC_VFS_TYPE_DEV] = "Device",
+	        [ARC_VFS_TYPE_FILE] = "File",
+	        [ARC_VFS_TYPE_DIR] = "Directory",
+	        [ARC_VFS_TYPE_BUFF] = "Buffer",
+	        [ARC_VFS_TYPE_FIFO] = "FIFO",
+	        [ARC_VFS_TYPE_MOUNT] = "Mount",
+	        [ARC_VFS_TYPE_ROOT] = "Root",
+	        [ARC_VFS_TYPE_LINK] = "Link",
+        };
+
+	while (children != NULL) {
+		for (int i = 0; i < org - level; i++) {
+			printf("\t");
+		}
+
+		ARC_VFSGraphData *data = (ARC_VFSGraphData *)&children->arb;
+		struct stat *stat = &data->stat;
+
+		if (data->type != ARC_VFS_TYPE_LINK) {
+			printf("%s (%s, %o, 0x%"PRIx64" B)\n", children->name, names[data->type], stat->st_mode, stat->st_size);
+		} else {
+			if (data->link == NULL) {
+				printf("%s (Broken Link, %o, 0x%"PRIx64" B) -/> NULL\n", children->name, stat->st_mode, stat->st_size);
+			} else {
+				printf("%s (Link, %o, 0x%"PRIx64" B) -> %s\n", children->name, stat->st_mode, stat->st_size, data->link->name);
+			}
+		}
+
+		internal_vfs_list(children, level - 1, org);
+		children = children->next;
+	}
+
 	return 0;
 }
 
 int vfs_list(char *path, int depth) {
+	if (path == NULL || depth == 0) {
+		return -1;
+	}
+
+	ARC_GraphNode *root = vfs_get_root(path);
+	ARC_GraphNode *node = path_traverse(root, path, NULL, NULL);
+
+	if (node == NULL) {
+		return -2;
+	}
+
+	internal_vfs_list(node, depth, depth);
+
 	return 0;
 }
 
