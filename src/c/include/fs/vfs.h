@@ -68,8 +68,8 @@ int vfs_close(ARC_File *file);
 int vfs_stat(char *path, struct stat *stat);
 int vfs_create(char *path, uint32_t mode);
 int vfs_remove(char *path);
-int vfs_link(char *dest, char *targ, uint32_t mode);
-int vfs_rename(char *to, char *from);
+int vfs_link(char *file, char *link, uint32_t mode);
+int vfs_rename(char *from, char *to);
 int vfs_list(char *path, int depth);
 
 

@@ -59,6 +59,23 @@ struct create_callback_args {
 	bool create;
 };
 
+static int vfs_mode2type(uint32_t mode) {
+	uint32_t type = mode & 0xF000;
+
+	switch (type) {
+		case S_IFMT: return ARC_VFS_TYPE_NULL;
+		case S_IFBLK: return ARC_VFS_TYPE_DEV;
+		case S_IFCHR: return ARC_VFS_TYPE_DEV;
+		case S_IFDIR: return ARC_VFS_TYPE_DIR;
+		case S_IFIFO: return ARC_VFS_TYPE_FIFO;
+		case S_IFLNK: return ARC_VFS_TYPE_LINK;
+		case S_IFREG: return ARC_VFS_TYPE_FILE;
+		case S_IFSOCK: return ARC_VFS_TYPE_NULL;
+	}
+
+	return ARC_VFS_TYPE_NULL;
+}
+
 // Will load and create (if requested) if the directories or end file or directory does not exist
 // TODO: Check if loaded file is a link
 static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, char *remaining, void *_arg) {
@@ -66,18 +83,32 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 
 	ARC_GraphNode *node = graph_create(sizeof(ARC_VFSGraphData));
 
-	ARC_DEBUG(INFO, "Created new node: %p\n", node);
-
 	if (node == NULL) {
 		return NULL;
 	}
 
-	return node;
-
 	ARC_VFSGraphData *parent_data = (ARC_VFSGraphData *)&parent->arb;
 	ARC_GraphNode *mount = parent_data->mount;
 
-	char *_path = path_get_abs(mount, parent);
+	ARC_VFSGraphData *node_data = (ARC_VFSGraphData *)&node->arb;
+	node_data->mount = mount;
+
+	int type = ARC_VFS_TYPE_DIR;
+
+	if (*remaining == 0) {
+		type = vfs_mode2type(arg->mode);
+	}
+
+	node_data->type = type;
+	node_data->stat.st_mode = arg->mode;
+
+	if (mount == NULL) {
+		return node;
+	}
+
+	ARC_DEBUG(INFO, "Mount is non-NULL, doing all the stuff\n");
+
+	char *_path = path_get_abs(parent, mount);
 	size_t path_len = strlen(_path) + strlen(name) + 1;
 	char *path = alloc(path_len);
 
@@ -90,7 +121,7 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 	ARC_VFSGraphData *mount_data = (ARC_VFSGraphData *)&mount->arb;
 	ARC_Resource *mount_res = mount_data->resource;
 
-	ARC_VFSGraphData *node_data = (ARC_VFSGraphData *)&node->arb;
+
 	struct stat *st = &node_data->stat;
 
 	if (mount_res->driver->stat(mount_res, path, st) != 0) {
@@ -104,8 +135,7 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 	void *dri_arg = mount_res->driver->locate(mount_res, path);
 	// TODO: Infer driver to use &fs_file[mount_res->index] or &fs_dir[mount_res->index]
 	// TODO: Create and set resource
-
-	node_data->mount = mount;
+	(void)dri_arg;
 
 	return node;
 
@@ -186,7 +216,7 @@ int vfs_unmount(char *mountpoint) {
 	ARC_ATOMIC_DEC(node->ref_count);
 	if (graph_remove(node, true) != 0) {
 		ARC_DEBUG(ERR, "Failed to remove node from node graph\n");
-		// TODO: Try to continue to remove it, or insert it into cache?
+		// TODO: Try to continue to remove it or insert it into cache?
 		ARC_HANG;
 	} else {
 		uninit_resource(res);
@@ -328,7 +358,11 @@ int vfs_close(ARC_File *file) {
 
 	ARC_GraphNode *mount = data->mount;
 
-	char *path_from_mount = path_get_abs(mount, node);
+	if (mount == NULL) {
+		return 0;
+	}
+
+	char *path_from_mount = path_get_abs(node, mount);
 
 	if (graph_remove(node, true) != 0) {
 		// TODO: Add to some sort of cache to try to remove again?
@@ -371,7 +405,7 @@ int vfs_create(char *path, uint32_t mode) {
 	}
 
 	ARC_GraphNode *root = vfs_get_root(path);
-	struct create_callback_args args = { .create = true };
+	struct create_callback_args args = { .create = true, .mode = mode };
 
 	if (path_traverse(root, path, vfs_create_callback, &args) == NULL) {
 		return -1;
@@ -400,7 +434,7 @@ int vfs_remove(char *path) {
 
 	ARC_GraphNode *mount = data->mount;
 
-	char *path_from_mount = path_get_abs(mount, node);
+	char *path_from_mount = path_get_abs(node, mount);
 
 	if (graph_remove(node, true) != 0) {
 		// TODO: Add to some sort of cache to try to remove again?
@@ -428,9 +462,14 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 		return -2;
 	}
 
+	ARC_VFSGraphData *file_data = (ARC_VFSGraphData *)&_file->arb;
+
 	root = vfs_get_root(link);
 	args.create = true;
-	ARC_GraphNode *_link = path_traverse(root, file, vfs_create_callback, &args);
+	args.mode = mode == 0 ? file_data->stat.st_mode : mode;
+	args.mode &= ~(0xF000);
+	args.mode |= S_IFLNK;
+	ARC_GraphNode *_link = path_traverse(root, link, vfs_create_callback, &args);
 
 	if (_link == NULL) {
 		return -3;
@@ -439,17 +478,18 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 	ARC_ATOMIC_INC(_file->ref_count);
 	ARC_VFSGraphData *link_data = (ARC_VFSGraphData *)&_link->arb;
 	link_data->link = _file;
-	link_data->type = ARC_VFS_TYPE_LINK;
 
-	char *rel_path = path_get_rel(_file, _link);
+	char *rel_path = path_get_rel(_link, _file);
 	ARC_DEBUG(INFO, "Relative path from %s (%p) -> %s (%p) is %s\n", link, _link, file, _file, rel_path);
-	free(rel_path);
+	if (rel_path != NULL) {
+		free(rel_path);
+	}
 
 	return 0;
 }
 
 // TODO: Account for links
-int vfs_rename(char *to, char *from) {
+int vfs_rename(char *from, char *to) {
 	if (from == NULL || to == NULL) {
 		return -1;
 	}
@@ -561,8 +601,6 @@ int vfs_list(char *path, int depth) {
 
 	ARC_GraphNode *root = vfs_get_root(path);
 	ARC_GraphNode *node = path_traverse(root, path, NULL, NULL);
-
-	ARC_DEBUG(INFO, "root=%p, node=%p\n", root, node);
 
 	if (node == NULL) {
 		return -2;
