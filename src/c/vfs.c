@@ -60,10 +60,9 @@ struct create_callback_args {
 };
 
 static int vfs_mode2type(uint32_t mode) {
-	uint32_t type = mode & 0xF000;
+	uint32_t type = mode & S_IFMT;
 
 	switch (type) {
-		case S_IFMT: return ARC_VFS_TYPE_NULL;
 		case S_IFBLK: return ARC_VFS_TYPE_DEV;
 		case S_IFCHR: return ARC_VFS_TYPE_DEV;
 		case S_IFDIR: return ARC_VFS_TYPE_DIR;
@@ -184,10 +183,23 @@ int vfs_mount(char *mountpoint, ARC_Resource *resource) {
 		return -2;
 	}
 
+	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+
+	if (data->type != ARC_VFS_TYPE_DIR) {
+		ARC_DEBUG(ERR, "Node is not directory\n");
+		return -3;
+	}
+
 	ARC_ATOMIC_INC(node->ref_count);
 
-	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+	ARC_GraphNode *dup = graph_duplicate(node);
+	ARC_GraphNode *t = NULL;
+	ARC_ATOMIC_XCHG(&dup->child, &node->child, &t);
+	ARC_ATOMIC_DEC(dup->ref_count);
+
 	data->resource = resource;
+	data->mount = dup;
+	data->type = ARC_VFS_TYPE_MOUNT;
 	// resource->driver->stat(resource, "/", &data->stat); // TODO: Does this work?
 
 	return 0;
@@ -212,16 +224,19 @@ int vfs_unmount(char *mountpoint) {
 	}
 
 	ARC_Resource *res = data->resource;
+	ARC_GraphNode *dup = data->mount;
 
 	ARC_ATOMIC_DEC(node->ref_count);
 	if (graph_remove(node, true) != 0) {
 		ARC_DEBUG(ERR, "Failed to remove node from node graph\n");
-		// TODO: Try to continue to remove it or insert it into cache?
+		// TODO: Try to continue to remove it, insert it into cache, or
+		// forcibly remove (without deleting) return error and let process holding it open close it?
 		ARC_HANG;
 	} else {
 		uninit_resource(res);
-		return 0;
 	}
+
+	graph_add(dup->parent, dup, NULL);
 
 	return 0;
 }
