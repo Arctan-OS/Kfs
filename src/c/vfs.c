@@ -27,7 +27,6 @@
 #include "abi-bits/fcntl.h"
 #include "abi-bits/seek-whence.h"
 #include "drivers/resource.h"
-#include "fs/graph.h"
 #include "fs/vfs.h"
 #include "global.h"
 #include "lib/atomics.h"
@@ -40,16 +39,17 @@
 
 #define NODE_CACHE_SIZE 1024
 
-static ARC_GraphNode *root = NULL;
+static ARC_GraphNode *vfs_root = NULL;
 static ARC_GraphNode *vfs_node_cache[1024] = { 0 };
 static uint64_t vfs_node_cache_idx = 0;
 static ARC_Spinlock vfs_node_cache_lock;
 
 static ARC_GraphNode *vfs_get_root(char *path) {
 	if (*path == '/') {
-		return root;
+		return vfs_root;
 	}
 
+	ARC_DEBUG(INFO, "Path %s is non root\n", path);
 	// TODO: if a process is running { root = pwd };
 	return NULL;
 }
@@ -60,14 +60,19 @@ struct create_callback_args {
 };
 
 // Will load and create (if requested) if the directories or end file or directory does not exist
+// TODO: Check if loaded file is a link
 static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, char *remaining, void *_arg) {
 	struct create_callback_args *arg = _arg;
 
 	ARC_GraphNode *node = graph_create(sizeof(ARC_VFSGraphData));
 
+	ARC_DEBUG(INFO, "Created new node: %p\n", node);
+
 	if (node == NULL) {
-		goto epic_fail;
+		return NULL;
 	}
+
+	return node;
 
 	ARC_VFSGraphData *parent_data = (ARC_VFSGraphData *)&parent->arb;
 	ARC_GraphNode *mount = parent_data->mount;
@@ -122,13 +127,15 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 
 
 int init_vfs() {
-	root = init_base_graph(sizeof(ARC_VFSGraphData));
+	vfs_root = init_base_graph(sizeof(ARC_VFSGraphData));
 
-	if (root == NULL) {
+	if (vfs_root == NULL) {
 		return -1;
 	}
 
 	init_static_spinlock(&vfs_node_cache_lock);
+
+	ARC_DEBUG(INFO, "Initialized VFS\n");
 
 	return 0;
 }
@@ -139,6 +146,7 @@ int vfs_mount(char *mountpoint, ARC_Resource *resource) {
 		return -1;
 	}
 
+	ARC_GraphNode *root = vfs_get_root(mountpoint);
 	ARC_GraphNode *node = path_traverse(root, mountpoint, NULL, NULL);
 
 	if (node == NULL) {
@@ -160,6 +168,7 @@ int vfs_unmount(char *mountpoint) {
 		return -1;
 	}
 
+	ARC_GraphNode *root = vfs_get_root(mountpoint);
 	ARC_GraphNode *node = path_traverse(root, mountpoint, NULL, NULL);
 
 	if (node == NULL) {
@@ -419,7 +428,7 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 		return -2;
 	}
 
-	ARC_GraphNode *root = vfs_get_root(link);
+	root = vfs_get_root(link);
 	args.create = true;
 	ARC_GraphNode *_link = path_traverse(root, file, vfs_create_callback, &args);
 
@@ -432,9 +441,14 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 	link_data->link = _file;
 	link_data->type = ARC_VFS_TYPE_LINK;
 
+	char *rel_path = path_get_rel(_file, _link);
+	ARC_DEBUG(INFO, "Relative path from %s (%p) -> %s (%p) is %s\n", link, _link, file, _file, rel_path);
+	free(rel_path);
+
 	return 0;
 }
 
+// TODO: Account for links
 int vfs_rename(char *to, char *from) {
 	if (from == NULL || to == NULL) {
 		return -1;
@@ -547,6 +561,8 @@ int vfs_list(char *path, int depth) {
 
 	ARC_GraphNode *root = vfs_get_root(path);
 	ARC_GraphNode *node = path_traverse(root, path, NULL, NULL);
+
+	ARC_DEBUG(INFO, "root=%p, node=%p\n", root, node);
 
 	if (node == NULL) {
 		return -2;
