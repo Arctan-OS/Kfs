@@ -120,7 +120,6 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 	ARC_VFSGraphData *mount_data = (ARC_VFSGraphData *)&mount->arb;
 	ARC_Resource *mount_res = mount_data->resource;
 
-
 	struct stat *st = &node_data->stat;
 
 	if (mount_res->driver->stat(mount_res, path, st) != 0) {
@@ -482,7 +481,7 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 	root = vfs_get_root(link);
 	args.create = true;
 	args.mode = mode == 0 ? file_data->stat.st_mode : mode;
-	args.mode &= ~(0xF000);
+	args.mode &= ~S_IFMT;
 	args.mode |= S_IFLNK;
 	ARC_GraphNode *_link = path_traverse(root, link, vfs_create_callback, &args);
 
