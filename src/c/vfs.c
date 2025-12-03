@@ -39,6 +39,14 @@
 
 #define NODE_CACHE_SIZE 1024
 
+typedef struct ARC_VFSGraphData {
+	ARC_Resource *resource;
+	ARC_GraphNode *link;
+	ARC_GraphNode *mount;
+	int type;
+	struct stat stat;
+} ARC_VFSGraphData;
+
 static ARC_GraphNode *vfs_root = NULL;
 static ARC_GraphNode *vfs_node_cache[1024] = { 0 };
 static uint64_t vfs_node_cache_idx = 0;
@@ -76,7 +84,6 @@ static int vfs_mode2type(uint32_t mode) {
 }
 
 // Will load and create (if requested) if the directories or end file or directory does not exist
-// TODO: Check if loaded file is a link
 static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, char *remaining, void *_arg) {
 	struct create_callback_args *arg = _arg;
 
@@ -130,10 +137,16 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 		// TODO: Create the node
 	}
 
+        ARC_GraphNode *link = NULL;
+        if (vfs_mode2type(st->st_mode) == ARC_VFS_TYPE_LINK) {
+                ARC_DEBUG(WARN, "Definitely loading link");
+                // TODO: This
+        }
+        
 	void *dri_arg = mount_res->driver->locate(mount_res, path);
-	// TODO: Infer driver to use &fs_file[mount_res->index] or &fs_dir[mount_res->index]
-	// TODO: Create and set resource
-	(void)dri_arg;
+	int group = type == ARC_VFS_TYPE_DIR ? ARC_DRIGRP_FS_DIR : ARC_DRIGRP_FS_FILE;
+        int index = mount_res->dri_index;
+        node_data->resource = init_resource(group, index, dri_arg);
 
 	return node;
 
