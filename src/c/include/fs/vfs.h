@@ -49,14 +49,6 @@ enum {
 	ARC_VFS_TYPE_DEV,
 };
 
-typedef struct ARC_VFSGraphData {
-	ARC_Resource *resource;
-	ARC_GraphNode *link;
-	ARC_GraphNode *mount;
-	int type;
-	struct stat stat;
-} ARC_VFSGraphData;
-
 int init_vfs();
 int vfs_mount(char *mountpoint, ARC_Resource *resource);
 int vfs_unmount(char *mountpoint);
@@ -71,7 +63,6 @@ int vfs_remove(char *path);
 int vfs_link(char *file, char *link, uint32_t mode);
 int vfs_rename(char *from, char *to);
 int vfs_list(char *path, int depth);
-
 
 /**
  * Check the requested permissions against the permissions of the file.
