@@ -83,6 +83,37 @@ static int vfs_mode2type(uint32_t mode) {
 	return ARC_VFS_TYPE_NULL;
 }
 
+static int vfs_load_node(ARC_GraphNode *node, char *path) {
+        ARC_VFSGraphData *node_data = (ARC_VFSGraphData *)&node->arb;
+        ARC_GraphNode *mount = node_data->mount;
+	ARC_VFSGraphData *mount_data = (ARC_VFSGraphData *)&mount->arb;
+	ARC_Resource *mount_res = mount_data->resource;
+
+	struct stat *st = &node_data->stat;
+
+	if (mount_res->driver->stat(mount_res, path, st) != 0) {
+                return -1;
+	}
+
+        int type = vfs_mode2type(st->st_mode);
+        node_data->type = type;
+        
+        ARC_GraphNode *link = NULL;
+        if (type == ARC_VFS_TYPE_LINK) {
+                ARC_DEBUG(WARN, "Definitely loading link");
+                // TODO: This
+                return 1;
+        }
+        
+        void *dri_arg = mount_res->driver->locate(mount_res, path);
+	int group = type == ARC_VFS_TYPE_DIR ? ARC_DRIGRP_FS_DIR : ARC_DRIGRP_FS_FILE;
+        int index = mount_res->dri_index;
+
+        node_data->resource = init_resource(group, index, dri_arg);
+
+        return 0;
+}
+
 // Will load and create (if requested) if the directories or end file or directory does not exist
 static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, char *remaining, void *_arg) {
 	struct create_callback_args *arg = _arg;
@@ -124,29 +155,10 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 
 	sprintf(path, "%s/%s", _path, name);
 
-	ARC_VFSGraphData *mount_data = (ARC_VFSGraphData *)&mount->arb;
-	ARC_Resource *mount_res = mount_data->resource;
-
-	struct stat *st = &node_data->stat;
-
-	if (mount_res->driver->stat(mount_res, path, st) != 0) {
-		if (!arg->create) {
-			goto epic_fail;
-		}
-
-		// TODO: Create the node
-	}
-
-        ARC_GraphNode *link = NULL;
-        if (vfs_mode2type(st->st_mode) == ARC_VFS_TYPE_LINK) {
-                ARC_DEBUG(WARN, "Definitely loading link");
-                // TODO: This
+        if (vfs_load_node(node, path) < 0 && arg->create) {
+                // TODO: Create the node on the device
+                ARC_DEBUG(WARN, "Definitely creating file on device")
         }
-        
-	void *dri_arg = mount_res->driver->locate(mount_res, path);
-	int group = type == ARC_VFS_TYPE_DIR ? ARC_DRIGRP_FS_DIR : ARC_DRIGRP_FS_FILE;
-        int index = mount_res->dri_index;
-        node_data->resource = init_resource(group, index, dri_arg);
 
 	return node;
 
