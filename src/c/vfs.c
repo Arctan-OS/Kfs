@@ -62,11 +62,6 @@ static ARC_GraphNode *vfs_get_root(char *path) {
 	return NULL;
 }
 
-struct create_callback_args {
-	uint32_t mode;
-	bool create;
-};
-
 static int vfs_mode2type(uint32_t mode) {
 	uint32_t type = mode & S_IFMT;
 
@@ -83,7 +78,15 @@ static int vfs_mode2type(uint32_t mode) {
 	return ARC_VFS_TYPE_NULL;
 }
 
-static int vfs_load_node(ARC_GraphNode *node, char *path) {
+struct create_callback_args {
+	uint32_t mode;
+	bool create;
+        bool no_links;
+};
+
+static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, char *remaining, void *_arg);
+
+static int vfs_load_node(ARC_GraphNode *node, char *path, bool no_links) {
         ARC_VFSGraphData *node_data = (ARC_VFSGraphData *)&node->arb;
         ARC_GraphNode *mount = node_data->mount;
 	ARC_VFSGraphData *mount_data = (ARC_VFSGraphData *)&mount->arb;
@@ -95,23 +98,35 @@ static int vfs_load_node(ARC_GraphNode *node, char *path) {
                 return -1;
 	}
 
+        int r = 0;
+        
         int type = vfs_mode2type(st->st_mode);
         node_data->type = type;
-        
-        ARC_GraphNode *link = NULL;
-        if (type == ARC_VFS_TYPE_LINK) {
-                ARC_DEBUG(WARN, "Definitely loading link");
-                // TODO: This
-                return 1;
-        }
-        
+
         void *dri_arg = mount_res->driver->locate(mount_res, path);
 	int group = type == ARC_VFS_TYPE_DIR ? ARC_DRIGRP_FS_DIR : ARC_DRIGRP_FS_FILE;
         int index = mount_res->dri_index;
 
         node_data->resource = init_resource(group, index, dri_arg);
+        
+        if (!no_links && type == ARC_VFS_TYPE_LINK) {
+                r++;
+                char *link_path = alloc(st->st_size);
 
-        return 0;
+                if (link_path == NULL) {
+                        return -2;
+                }
+
+                ARC_File fake = { .node = node, .offset = 0 };
+                if (vfs_read(link_path, st->st_size, 1, &fake) == 0) {
+                        return -3;
+                }
+                
+                struct create_callback_args args = { .mode = 0, .create = false, .no_links = true };
+                node_data->link = path_traverse(node, link_path, vfs_create_callback, &args);
+        }
+
+        return r;
 }
 
 // Will load and create (if requested) if the directories or end file or directory does not exist
@@ -155,7 +170,7 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 
 	sprintf(path, "%s/%s", _path, name);
 
-        if (vfs_load_node(node, path) < 0 && arg->create) {
+        if (vfs_load_node(node, path, arg->no_links) < 0 && arg->create) {
                 // TODO: Create the node on the device
                 ARC_DEBUG(WARN, "Definitely creating file on device")
         }
