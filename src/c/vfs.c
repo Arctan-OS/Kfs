@@ -93,52 +93,48 @@ static int vfs_load_node(ARC_GraphNode *node, char *path, bool no_links) {
         ARC_GraphNode *mount = node_data->mount;
 	ARC_VFSGraphData *mount_data = (ARC_VFSGraphData *)&mount->arb;
 	ARC_Resource *mount_res = mount_data->resource;
-
-        ARC_DEBUG(INFO, "%p %p %p %p\n", node_data, mount, mount_data, mount_res);
         
         if (mount_res == NULL) {
                 ARC_DEBUG(ERR, "No mounted resource\n");
                 return -1;
         }
+
+        int type = node_data->type;
+        void *dri_arg = mount_res->driver->locate(mount_res, path);
+
+        if (dri_arg == NULL) {
+                ARC_DEBUG(ERR, "Could not locate\n");
+                return -2;
+        }
+        
+	int group = type == ARC_VFS_TYPE_DIR ? ARC_DRIGRP_FS_DIR : ARC_DRIGRP_FS_FILE;
+        int index = mount_res->dri_index;
+        // NOTE: Both file and directory group drivers should preform a stat upon init
+        node_data->resource = init_resource(group, index, dri_arg);
         
 	struct stat *st = &node_data->stat;
 
-        ARC_DEBUG(INFO, "st=%p\n", st);
-        
-	if (mount_res->driver->stat(mount_res, path, st) != 0) {
-                ARC_DEBUG(INFO, "Stat failed\n");
-                return -2;
-	}
-
-        int r = 0;
-        
-        int type = vfs_mode2type(st->st_mode);
-        node_data->type = type;
-        
-        void *dri_arg = mount_res->driver->locate(mount_res, path);
-	int group = type == ARC_VFS_TYPE_DIR ? ARC_DRIGRP_FS_DIR : ARC_DRIGRP_FS_FILE;
-        int index = mount_res->dri_index;
-
-        node_data->resource = init_resource(group, index, dri_arg);
+        type = node_data->type = vfs_mode2type(st->st_mode);
         
         if (!no_links && type == ARC_VFS_TYPE_LINK) {
-                r++;
                 char *link_path = alloc(st->st_size);
 
                 if (link_path == NULL) {
-                        return -2;
+                        return -3;
                 }
 
                 ARC_File fake = { .node = node, .offset = 0 };
                 if (vfs_read(link_path, st->st_size, 1, &fake) == 0) {
-                        return -3;
+                        return -4;
                 }
                 
                 struct create_callback_args args = { .mode = 0, .create = false, .no_links = true };
                 node_data->link = path_traverse(node, link_path, vfs_create_callback, &args);
+
+                return 1;
         }
 
-        return r;
+        return 0;
 }
 
 // Will load and create (if requested) if the directories or end file or directory does not exist
