@@ -87,22 +87,34 @@ struct create_callback_args {
 static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, char *remaining, void *_arg);
 
 static int vfs_load_node(ARC_GraphNode *node, char *path, bool no_links) {
+        ARC_DEBUG(INFO, "Loading node %p with path %s, no links ?= %d\n", node, path, no_links);
+        
         ARC_VFSGraphData *node_data = (ARC_VFSGraphData *)&node->arb;
         ARC_GraphNode *mount = node_data->mount;
 	ARC_VFSGraphData *mount_data = (ARC_VFSGraphData *)&mount->arb;
 	ARC_Resource *mount_res = mount_data->resource;
 
+        ARC_DEBUG(INFO, "%p %p %p %p\n", node_data, mount, mount_data, mount_res);
+        
+        if (mount_res == NULL) {
+                ARC_DEBUG(ERR, "No mounted resource\n");
+                return -1;
+        }
+        
 	struct stat *st = &node_data->stat;
 
+        ARC_DEBUG(INFO, "st=%p\n", st);
+        
 	if (mount_res->driver->stat(mount_res, path, st) != 0) {
-                return -1;
+                ARC_DEBUG(INFO, "Stat failed\n");
+                return -2;
 	}
 
         int r = 0;
         
         int type = vfs_mode2type(st->st_mode);
         node_data->type = type;
-
+        
         void *dri_arg = mount_res->driver->locate(mount_res, path);
 	int group = type == ARC_VFS_TYPE_DIR ? ARC_DRIGRP_FS_DIR : ARC_DRIGRP_FS_FILE;
         int index = mount_res->dri_index;
@@ -140,7 +152,7 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 	}
 
 	ARC_VFSGraphData *parent_data = (ARC_VFSGraphData *)&parent->arb;
-	ARC_GraphNode *mount = parent_data->mount;
+	ARC_GraphNode *mount = parent_data->type == ARC_VFS_TYPE_MOUNT ? parent : parent_data->mount;
 
 	ARC_VFSGraphData *node_data = (ARC_VFSGraphData *)&node->arb;
 	node_data->mount = mount;
@@ -169,10 +181,16 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 	}
 
 	sprintf(path, "%s/%s", _path, name);
-
+        ARC_DEBUG(INFO, "Loading / creating path %s on device %p\n", path, mount);
+        
         if (vfs_load_node(node, path, arg->no_links) < 0 && arg->create) {
-                // TODO: Create the node on the device
-                ARC_DEBUG(WARN, "Definitely creating file on device")
+                ARC_VFSGraphData *mount_data = (ARC_VFSGraphData *)&mount->arb;
+                ARC_Resource *mount_res = mount_data->resource;
+
+                if (mount_res->driver->create(mount_res, path, arg->mode, type) != 0) {
+                        ARC_DEBUG(ERR, "Failed to create path\n");
+                        goto epic_fail;
+                }
         }
 
 	return node;
@@ -192,7 +210,6 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 
 	return NULL;
 }
-
 
 int init_vfs() {
 	vfs_root = init_base_graph(sizeof(ARC_VFSGraphData));
@@ -237,6 +254,7 @@ int vfs_mount(char *mountpoint, ARC_Resource *resource) {
 	ARC_ATOMIC_DEC(dup->ref_count);
 
 	data->resource = resource;
+        ARC_DEBUG(INFO, "Mount %p resource is %p\n", node, data->resource);
 	data->mount = dup;
 	data->type = ARC_VFS_TYPE_MOUNT;
 	// resource->driver->stat(resource, "/", &data->stat); // TODO: Does this work?
@@ -420,6 +438,8 @@ int vfs_close(ARC_File *file) {
 
 	if (graph_remove(node, true) != 0) {
 		// TODO: Add to some sort of cache to try to remove again?
+		ARC_DEBUG(ERR, "Failed to remove node\n");
+                ARC_HANG;
 	}
 
 	if (mount != NULL) {
@@ -492,6 +512,8 @@ int vfs_remove(char *path) {
 
 	if (graph_remove(node, true) != 0) {
 		// TODO: Add to some sort of cache to try to remove again?
+		ARC_DEBUG(ERR, "Failed to remove node\n");
+                ARC_HANG;
 	}
 
 	if (mount != NULL) {
@@ -542,7 +564,10 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 	return 0;
 }
 
-// TODO: Account for links
+// TODO: Account for links - currently if a link is renamed such that
+//       the depth from the shared parent directory is changed it will break.
+//       Shall the kernel be nice and recalculate the path of a symlink or let
+//       it be broke?
 int vfs_rename(char *from, char *to) {
 	if (from == NULL || to == NULL) {
 		return -1;
