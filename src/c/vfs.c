@@ -26,6 +26,7 @@
 */
 #include "abi-bits/fcntl.h"
 #include "abi-bits/seek-whence.h"
+#include "drivers/dri_defs.h"
 #include "drivers/resource.h"
 #include "fs/vfs.h"
 #include "global.h"
@@ -163,6 +164,9 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 	node_data->stat.st_mode = arg->mode;
 
 	if (mount == NULL) {
+                node_data->resource = type == ARC_VFS_TYPE_FILE ?
+                                      init_resource(ARC_DRIGRP_FS_FILE, ARC_DRIDEF_FS_FILE_BUFFER, NULL)
+                                      : NULL;
 		return node;
 	}
 
@@ -207,6 +211,37 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 	return NULL;
 }
 
+static int vfs_remove_node(ARC_GraphNode *node) {
+        ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+        ARC_GraphNode *link = data->link;
+	ARC_GraphNode *mount = data->mount;
+        
+        char *path_from_mount = mount != NULL ? path_get_abs(node, mount) : NULL;
+
+        ARC_ATOMIC_DEC(node->ref_count); // End the traverse operation
+        
+	if (graph_remove(node, true) != 0) {
+		// TODO: Add to some sort of cache to try to remove again?
+		if (mount != NULL) {
+                        free(path_from_mount);
+                }
+		return -1;
+	}
+
+        if (link != NULL) {
+                ARC_ATOMIC_DEC(link->ref_count);               
+        }
+        
+	if (mount != NULL) {
+		data = (ARC_VFSGraphData *)&mount->arb;
+		ARC_Resource *res = data->resource;
+		res->driver->remove(res, path_from_mount); // TODO: Does it really matter if this fails?
+                free(path_from_mount);
+	}
+
+        return 0;
+}
+
 int init_vfs() {
 	vfs_root = init_base_graph(sizeof(ARC_VFSGraphData));
 
@@ -242,8 +277,9 @@ int vfs_mount(char *mountpoint, ARC_Resource *resource) {
 		return -3;
 	}
 
-	ARC_ATOMIC_INC(node->ref_count);
-
+        // NOTE: Leave ref_count incremented so the node may only be deleted by
+        //       the unmount function
+        
 	ARC_GraphNode *dup = graph_duplicate(node);
 	ARC_GraphNode *t = NULL;
 	ARC_ATOMIC_XCHG(&dup->child, &node->child, &t);
@@ -279,7 +315,9 @@ int vfs_unmount(char *mountpoint) {
 	ARC_Resource *res = data->resource;
 	ARC_GraphNode *dup = data->mount;
 
-	ARC_ATOMIC_DEC(node->ref_count);
+        // NOTE: Decrement previously undecremented ref_count
+	ARC_ATOMIC_DEC(node->ref_count); 
+        
 	if (graph_remove(node, true) != 0) {
 		ARC_DEBUG(ERR, "Failed to remove node from node graph\n");
 		// TODO: Try to continue to remove it, insert it into cache, or
@@ -330,8 +368,15 @@ size_t vfs_read(void *buffer, size_t size, size_t count, ARC_File *file) {
 	}
 
 	ARC_GraphNode *node = file->node;
+        ARC_ATOMIC_INC(node->ref_count);
 	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+	ARC_Resource *res = data->resource;
 
+        if (res == NULL) {
+                ARC_ATOMIC_DEC(node->ref_count);
+                return 0;
+        }
+        
 	ARC_File _file = { 0 };
 	memcpy(&_file, file, sizeof(*file));
 
@@ -341,9 +386,12 @@ size_t vfs_read(void *buffer, size_t size, size_t count, ARC_File *file) {
 	}
 
 	_file.node = node;
-	ARC_Resource *res = data->resource;
 
-	return res->driver->read(buffer, size, count, file, res);
+        size_t ret = res->driver->read(buffer, size, count, file, res);
+
+        ARC_ATOMIC_DEC(node->ref_count);
+        
+	return ret;
 }
 
 size_t vfs_write(void *buffer, size_t size, size_t count, ARC_File *file) {
@@ -352,8 +400,15 @@ size_t vfs_write(void *buffer, size_t size, size_t count, ARC_File *file) {
 	}
 
 	ARC_GraphNode *node = file->node;
+        ARC_ATOMIC_INC(node->ref_count);
 	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+	ARC_Resource *res = data->resource;
 
+        if (res == NULL) {
+                ARC_ATOMIC_DEC(node->ref_count);
+                return 0;
+        }
+        
 	ARC_File _file = { 0 };
 	memcpy(&_file, file, sizeof(*file));
 
@@ -363,9 +418,12 @@ size_t vfs_write(void *buffer, size_t size, size_t count, ARC_File *file) {
 	}
 
 	_file.node = node;
-	ARC_Resource *res = data->resource;
 
-	return res->driver->read(buffer, size, count, file, res);
+        size_t ret = res->driver->read(buffer, size, count, file, res);
+        
+        ARC_ATOMIC_DEC(node->ref_count);
+        
+	return ret;
 }
 
 int vfs_seek(ARC_File *file, long offset, int whence) {
@@ -417,33 +475,13 @@ int vfs_close(ARC_File *file) {
 		return -1;
 	}
 
-	ARC_GraphNode *node = file->node;
-	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
+        ARC_GraphNode *node = file->node;
+        ARC_ATOMIC_DEC(node->ref_count);
 
-	if (data->type == ARC_VFS_TYPE_LINK) {
-		ARC_ATOMIC_DEC(data->link->ref_count);
-	}
-
-	ARC_GraphNode *mount = data->mount;
-
-	if (mount == NULL) {
-		return 0;
-	}
-
-	char *path_from_mount = path_get_abs(node, mount);
-
-	if (graph_remove(node, true) != 0) {
-		// TODO: Add to some sort of cache to try to remove again?
-		ARC_DEBUG(ERR, "Failed to remove node\n");
-                ARC_HANG;
-	}
-
-	if (mount != NULL) {
-		data = (ARC_VFSGraphData *)&mount->arb;
-		ARC_Resource *res = data->resource;
-		res->driver->remove(res, path_from_mount); // TODO: Does it really matter if this fails?
-	}
-
+        if (vfs_remove_node(node) != 0) {
+                ARC_ATOMIC_INC(node->ref_count);
+                return -1;
+        }
 
 	return 0;
 }
@@ -466,6 +504,8 @@ int vfs_stat(char *path, struct stat *stat) {
 	res->driver->stat(res, NULL, &data->stat); // TODO: Does it really matter if this fails?
 	memcpy(stat, &data->stat, sizeof(*stat));
 
+        ARC_ATOMIC_DEC(node->ref_count);
+        
 	return 0;
 }
 
@@ -476,11 +516,14 @@ int vfs_create(char *path, uint32_t mode) {
 
 	ARC_GraphNode *root = vfs_get_root(path);
 	struct create_callback_args args = { .create = true, .mode = mode };
-
-	if (path_traverse(root, path, vfs_create_callback, &args) == NULL) {
+        ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args);
+        
+	if (node == NULL) {
 		return -1;
 	}
 
+        ARC_ATOMIC_DEC(node->ref_count);
+        
 	return 0;
 }
 
@@ -497,28 +540,9 @@ int vfs_remove(char *path) {
 		return -1;
 	}
 
-	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
-	if (data->type == ARC_VFS_TYPE_LINK) {
-		ARC_ATOMIC_DEC(data->link->ref_count);
-	}
+        ARC_ATOMIC_DEC(node->ref_count);
 
-	ARC_GraphNode *mount = data->mount;
-
-	char *path_from_mount = path_get_abs(node, mount);
-
-	if (graph_remove(node, true) != 0) {
-		// TODO: Add to some sort of cache to try to remove again?
-		ARC_DEBUG(ERR, "Failed to remove node\n");
-                ARC_HANG;
-	}
-
-	if (mount != NULL) {
-		data = (ARC_VFSGraphData *)&mount->arb;
-		ARC_Resource *res = data->resource;
-		res->driver->remove(res, path_from_mount); // TODO: Does it really matter if this fails?
-	}
-
-	return 0;
+	return vfs_remove_node(node);
 }
 
 int vfs_link(char *file, char *link, uint32_t mode) {
@@ -547,16 +571,21 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 		return -3;
 	}
 
-	ARC_ATOMIC_INC(_file->ref_count);
 	ARC_VFSGraphData *link_data = (ARC_VFSGraphData *)&_link->arb;
 	link_data->link = _file;
 
 	char *rel_path = path_get_rel(_link, _file);
-	ARC_DEBUG(INFO, "Relative path from %s (%p) -> %s (%p) is %s\n", link, _link, file, _file, rel_path);
 	if (rel_path != NULL) {
+                ARC_File fake = { .node = _link, .offset = 0 };
+                vfs_write(rel_path, strlen(rel_path), 1, &fake);
+                
 		free(rel_path);
 	}
 
+        // NOTE: Ref_count for _file is left incremented to signify that is in-use by
+        //       the link
+        ARC_ATOMIC_DEC(_link->ref_count);
+        
 	return 0;
 }
 
@@ -600,6 +629,8 @@ int vfs_rename(char *from, char *to) {
 		return -4;
 	}
 
+        ARC_ATOMIC_DEC(_from->ref_count);
+        
 	if (graph_remove(_from, false) != 0) {
 		return -5;
 	}
@@ -614,9 +645,11 @@ int vfs_rename(char *from, char *to) {
 	if (name[name_len - 1] == '/') {
 		name[name_len - 1] = 0;
 	}
-
+        
 	graph_add(parent, _from, name);
 
+        ARC_ATOMIC_DEC(parent->ref_count);
+        
 	free(name);
 
 	return 0;
@@ -653,12 +686,12 @@ static int internal_vfs_list(ARC_GraphNode *node, int level, int org) {
 		struct stat *stat = &data->stat;
 
 		if (data->type != ARC_VFS_TYPE_LINK) {
-			printf("%s (%s, %o, 0x%"PRIx64" B)\n", children->name, names[data->type], stat->st_mode, stat->st_size);
+			printf("%s (%s, %o, 0x%"PRIx64" B, %lu)\n", children->name, names[data->type], stat->st_mode, stat->st_size, children->ref_count);
 		} else {
 			if (data->link == NULL) {
-				printf("%s (Broken Link, %o, 0x%"PRIx64" B) -/> NULL\n", children->name, stat->st_mode, stat->st_size);
+				printf("%s (Broken Link, %o, 0x%"PRIx64" B, %lu) -/> NULL\n", children->name, stat->st_mode, stat->st_size, children->ref_count);
 			} else {
-				printf("%s (Link, %o, 0x%"PRIx64" B) -> %s\n", children->name, stat->st_mode, stat->st_size, data->link->name);
+				printf("%s (Link, %o, 0x%"PRIx64" B, %lu) -> %s\n", children->name, stat->st_mode, stat->st_size, children->ref_count, data->link->name);
 			}
 		}
 
