@@ -217,8 +217,6 @@ static int vfs_remove_node(ARC_GraphNode *node) {
 	ARC_GraphNode *mount = data->mount;
         
         char *path_from_mount = mount != NULL ? path_get_abs(node, mount) : NULL;
-
-        ARC_ATOMIC_DEC(node->ref_count); // End the traverse operation
         
 	if (graph_remove(node, true) != 0) {
 		// TODO: Add to some sort of cache to try to remove again?
