@@ -211,7 +211,7 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 	return NULL;
 }
 
-static int vfs_remove_node(ARC_GraphNode *node) {
+static int vfs_remove_node(ARC_GraphNode *node, bool phys) {
         ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
         ARC_GraphNode *link = data->link;
 	ARC_GraphNode *mount = data->mount;
@@ -227,10 +227,10 @@ static int vfs_remove_node(ARC_GraphNode *node) {
 	}
 
         if (link != NULL) {
-                ARC_ATOMIC_DEC(link->ref_count);               
+                ARC_ATOMIC_DEC(link->ref_count);
         }
         
-	if (mount != NULL) {
+	if (phys && mount != NULL) {
 		data = (ARC_VFSGraphData *)&mount->arb;
 		ARC_Resource *res = data->resource;
 		res->driver->remove(res, path_from_mount); // TODO: Does it really matter if this fails?
@@ -476,7 +476,7 @@ int vfs_close(ARC_File *file) {
         ARC_GraphNode *node = file->node;
         ARC_ATOMIC_DEC(node->ref_count);
 
-        if (vfs_remove_node(node) != 0) {
+        if (vfs_remove_node(node, false) != 0) {
                 ARC_ATOMIC_INC(node->ref_count);
                 return -1;
         }
@@ -540,7 +540,7 @@ int vfs_remove(char *path) {
 
         ARC_ATOMIC_DEC(node->ref_count);
 
-	return vfs_remove_node(node);
+	return vfs_remove_node(node, true);
 }
 
 int vfs_link(char *file, char *link, uint32_t mode) {
