@@ -284,11 +284,12 @@ int vfs_mount(char *mountpoint, ARC_Resource *resource) {
 	ARC_ATOMIC_DEC(dup->ref_count);
 
 	data->resource = resource;
-        ARC_DEBUG(INFO, "Mount %p resource is %p\n", node, data->resource);
 	data->mount = dup;
 	data->type = ARC_VFS_TYPE_MOUNT;
 	// resource->driver->stat(resource, "/", &data->stat); // TODO: Does this work?
 
+        ARC_DEBUG(INFO, "Mounted resource %p at %s, duplicated %p\n", resource, mountpoint, dup);
+        
 	return 0;
 }
 
@@ -299,6 +300,7 @@ int vfs_unmount(char *mountpoint) {
 
 	ARC_GraphNode *root = vfs_get_root(mountpoint);
 	ARC_GraphNode *node = path_traverse(root, mountpoint, NULL, NULL);
+	ARC_ATOMIC_DEC(node->ref_count); 
 
 	if (node == NULL) {
 		return -2;
@@ -357,6 +359,8 @@ int vfs_open(char *path, int flags, uint32_t mode, ARC_File **ret) {
 
 	file->node = node;
 
+        // NOTE: Leave node->ref_count incremented from path_traverse for the open file descriptor
+        
 	return 0;
 }
 
@@ -366,12 +370,12 @@ size_t vfs_read(void *buffer, size_t size, size_t count, ARC_File *file) {
 	}
 
 	ARC_GraphNode *node = file->node;
-        ARC_ATOMIC_INC(node->ref_count);
+        ARC_ATOMIC_INC(node->ref_count); // A
 	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
 	ARC_Resource *res = data->resource;
 
         if (res == NULL) {
-                ARC_ATOMIC_DEC(node->ref_count);
+                ARC_ATOMIC_DEC(node->ref_count); // A
                 return 0;
         }
         
@@ -387,7 +391,7 @@ size_t vfs_read(void *buffer, size_t size, size_t count, ARC_File *file) {
 
         size_t ret = res->driver->read(buffer, size, count, file, res);
 
-        ARC_ATOMIC_DEC(node->ref_count);
+        ARC_ATOMIC_DEC(node->ref_count); // A
         
 	return ret;
 }
@@ -398,12 +402,12 @@ size_t vfs_write(void *buffer, size_t size, size_t count, ARC_File *file) {
 	}
 
 	ARC_GraphNode *node = file->node;
-        ARC_ATOMIC_INC(node->ref_count);
+        ARC_ATOMIC_INC(node->ref_count); // A
 	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
 	ARC_Resource *res = data->resource;
 
         if (res == NULL) {
-                ARC_ATOMIC_DEC(node->ref_count);
+                ARC_ATOMIC_DEC(node->ref_count); // A
                 return 0;
         }
         
@@ -419,7 +423,7 @@ size_t vfs_write(void *buffer, size_t size, size_t count, ARC_File *file) {
 
         size_t ret = res->driver->read(buffer, size, count, file, res);
         
-        ARC_ATOMIC_DEC(node->ref_count);
+        ARC_ATOMIC_DEC(node->ref_count); // A
         
 	return ret;
 }
@@ -430,6 +434,7 @@ int vfs_seek(ARC_File *file, long offset, int whence) {
 	}
 
 	ARC_GraphNode *node = file->node;
+        ARC_ATOMIC_INC(node->ref_count); // A
 	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
 
 	if (data->link != NULL) {
@@ -465,6 +470,8 @@ int vfs_seek(ARC_File *file, long offset, int whence) {
 		}
 	}
 
+        ARC_ATOMIC_DEC(node->ref_count); // A
+        
 	return 0;
 }
 
@@ -474,10 +481,9 @@ int vfs_close(ARC_File *file) {
 	}
 
         ARC_GraphNode *node = file->node;
-        ARC_ATOMIC_DEC(node->ref_count);
 
-        if (vfs_remove_node(node, false) != 0) {
-                ARC_ATOMIC_INC(node->ref_count);
+        // Decrement from path_traverse in vfs_open 
+        if (ARC_ATOMIC_DEC(node->ref_count) == 0 && vfs_remove_node(node, false) != 0) {
                 return -1;
         }
 
@@ -491,7 +497,7 @@ int vfs_stat(char *path, struct stat *stat) {
 
 	ARC_GraphNode *root = vfs_get_root(path);
 	struct create_callback_args args = { .create = false };
-	ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args);
+	ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args); // A
 
 	if (node == NULL) {
 		return -2;
@@ -499,12 +505,12 @@ int vfs_stat(char *path, struct stat *stat) {
 
 	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
 	ARC_Resource *res = data->resource;
-	res->driver->stat(res, NULL, &data->stat); // TODO: Does it really matter if this fails?
+	int r = res->driver->stat(res, NULL, &data->stat); // TODO: Does it really matter if this fails?
 	memcpy(stat, &data->stat, sizeof(*stat));
 
-        ARC_ATOMIC_DEC(node->ref_count);
+        ARC_ATOMIC_DEC(node->ref_count); // A
         
-	return 0;
+	return r;
 }
 
 int vfs_create(char *path, uint32_t mode) {
@@ -514,13 +520,13 @@ int vfs_create(char *path, uint32_t mode) {
 
 	ARC_GraphNode *root = vfs_get_root(path);
 	struct create_callback_args args = { .create = true, .mode = mode };
-        ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args);
+        ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args); // A
         
 	if (node == NULL) {
 		return -1;
 	}
 
-        ARC_ATOMIC_DEC(node->ref_count);
+        ARC_ATOMIC_DEC(node->ref_count); // A
         
 	return 0;
 }
@@ -532,13 +538,13 @@ int vfs_remove(char *path) {
 
 	ARC_GraphNode *root = vfs_get_root(path);
 	struct create_callback_args args = { .create = false };
-	ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args);
+	ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args); // A
 
 	if (node == NULL) {
 		return -1;
 	}
 
-        ARC_ATOMIC_DEC(node->ref_count);
+        ARC_ATOMIC_DEC(node->ref_count); // A
 
 	return vfs_remove_node(node, true);
 }
@@ -550,7 +556,7 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 
 	ARC_GraphNode *root = vfs_get_root(file);
 	struct create_callback_args args = { .create = false };
-	ARC_GraphNode *_file = path_traverse(root, file, vfs_create_callback, &args);
+	ARC_GraphNode *_file = path_traverse(root, file, vfs_create_callback, &args); // A
 
 	if (_file == NULL) {
 		return -2;
@@ -563,9 +569,10 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 	args.mode = mode == 0 ? file_data->stat.st_mode : mode;
 	args.mode &= ~S_IFMT;
 	args.mode |= S_IFLNK;
-	ARC_GraphNode *_link = path_traverse(root, link, vfs_create_callback, &args);
+	ARC_GraphNode *_link = path_traverse(root, link, vfs_create_callback, &args); // B
 
 	if (_link == NULL) {
+                ARC_ATOMIC_DEC(_file->ref_count); // A
 		return -3;
 	}
 
@@ -582,8 +589,8 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 
         // NOTE: Ref_count for _file is left incremented to signify that is in-use by
         //       the link
-        ARC_ATOMIC_DEC(_link->ref_count);
-        
+        ARC_ATOMIC_DEC(_link->ref_count); // B
+
 	return 0;
 }
 
@@ -597,9 +604,8 @@ int vfs_rename(char *from, char *to) {
 	}
 
 	ARC_GraphNode *root = vfs_get_root(from);
-
 	struct create_callback_args args = { .create = false };
-	ARC_GraphNode *_from = path_traverse(root, from, vfs_create_callback, &args);
+	ARC_GraphNode *_from = path_traverse(root, from, vfs_create_callback, &args); // A
 
 	if (_from == NULL) {
 		return -2;
@@ -615,26 +621,29 @@ int vfs_rename(char *from, char *to) {
 
 	char *parent_path = strndup(to, i + 1);
 	if (parent_path == NULL) {
+                ARC_ATOMIC_DEC(_from->ref_count); // A
 		return -3;
 	}
 
 	root = vfs_get_root(parent_path);
 	args.create = true;
-	ARC_GraphNode *parent = path_traverse(root, parent_path, vfs_create_callback, &args);
+	ARC_GraphNode *parent = path_traverse(root, parent_path, vfs_create_callback, &args); // B
 	free(parent_path);
+
+        ARC_ATOMIC_DEC(_from->ref_count); // A
 
 	if (parent == NULL) {
 		return -4;
 	}
 
-        ARC_ATOMIC_DEC(_from->ref_count);
-        
 	if (graph_remove(_from, false) != 0) {
+                ARC_ATOMIC_DEC(parent->ref_count); // B
 		return -5;
 	}
 
 	char *name = strdup(&to[i + 1]);
 	if (name == NULL) {
+                ARC_ATOMIC_DEC(parent->ref_count); // B
 		return -6;
 	}
 
@@ -643,10 +652,10 @@ int vfs_rename(char *from, char *to) {
 	if (name[name_len - 1] == '/') {
 		name[name_len - 1] = 0;
 	}
-        
+         
 	graph_add(parent, _from, name);
-
-        ARC_ATOMIC_DEC(parent->ref_count);
+        
+        ARC_ATOMIC_DEC(parent->ref_count); // B
         
 	free(name);
 
@@ -706,12 +715,14 @@ int vfs_list(char *path, int depth) {
 	}
 
 	ARC_GraphNode *root = vfs_get_root(path);
-	ARC_GraphNode *node = path_traverse(root, path, NULL, NULL);
+	ARC_GraphNode *node = path_traverse(root, path, NULL, NULL); // A
 
 	if (node == NULL) {
 		return -2;
 	}
 
+        ARC_ATOMIC_DEC(node->ref_count); // A
+         
 	internal_vfs_list(node, depth, depth);
 
 	return 0;
