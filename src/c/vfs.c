@@ -49,8 +49,6 @@ typedef struct ARC_VFSGraphData {
 } ARC_VFSGraphData;
 
 static ARC_GraphNode *vfs_root = NULL;
-static ARC_GraphNode *vfs_node_cache[1024] = { 0 };
-static uint64_t vfs_node_cache_idx = 0;
 static ARC_Spinlock vfs_node_cache_lock;
 
 static ARC_GraphNode *vfs_get_root(char *path) {
@@ -87,7 +85,7 @@ struct create_callback_args {
 
 static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, char *remaining, void *_arg);
 
-static int vfs_load_node(ARC_GraphNode *node, char *path, bool no_links) {
+static int vfs_load_node(ARC_GraphNode *parent, ARC_GraphNode *node, char *path, bool no_links) {
         ARC_DEBUG(INFO, "Loading node %p with path %s, no links ?= %d\n", node, path, no_links);
         
         ARC_VFSGraphData *node_data = (ARC_VFSGraphData *)&node->arb;
@@ -110,11 +108,11 @@ static int vfs_load_node(ARC_GraphNode *node, char *path, bool no_links) {
         
 	int group = type == ARC_VFS_TYPE_DIR ? ARC_DRIGRP_FS_DIR : ARC_DRIGRP_FS_FILE;
         int index = mount_res->dri_index;
-        // NOTE: Both file and directory group drivers should preform a stat upon init
         node_data->resource = init_resource(group, index, dri_arg);
         
 	struct stat *st = &node_data->stat;
-
+        node_data->resource->driver->stat(node_data->resource, NULL, st);
+        
         type = node_data->type = vfs_mode2type(st->st_mode);
         
         if (!no_links && type == ARC_VFS_TYPE_LINK) {
@@ -129,8 +127,10 @@ static int vfs_load_node(ARC_GraphNode *node, char *path, bool no_links) {
                         return -4;
                 }
                 
+                ARC_DEBUG(INFO, "Link path %s\n", link_path);
+                
                 struct create_callback_args args = { .mode = 0, .create = false, .no_links = true };
-                node_data->link = path_traverse(node, link_path, vfs_create_callback, &args);
+                node_data->link = path_traverse(parent, link_path, vfs_create_callback, &args);
 
                 return 1;
         }
@@ -141,6 +141,7 @@ static int vfs_load_node(ARC_GraphNode *node, char *path, bool no_links) {
 // Will load and create (if requested) if the directories or end file or directory does not exist
 static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, char *remaining, void *_arg) {
 	struct create_callback_args *arg = _arg;
+        ARC_DEBUG(INFO, "vfs_create_callback: working on path %s from parent %p\n", name, parent);
 
 	ARC_GraphNode *node = graph_create(sizeof(ARC_VFSGraphData));
 
@@ -183,7 +184,7 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 	sprintf(path, "%s/%s", _path, name);
         ARC_DEBUG(INFO, "Loading / creating path %s on device %p\n", path, mount);
         
-        if (vfs_load_node(node, path, arg->no_links) < 0 && arg->create) {
+        if (vfs_load_node(parent, node, path, arg->no_links) < 0 && arg->create) {
                 ARC_VFSGraphData *mount_data = (ARC_VFSGraphData *)&mount->arb;
                 ARC_Resource *mount_res = mount_data->resource;
 
@@ -333,6 +334,8 @@ int vfs_unmount(char *mountpoint) {
 }
 
 int vfs_open(char *path, int flags, uint32_t mode, ARC_File **ret) {
+        (void)flags;
+        
 	if (path == NULL || mode == 0 || ret == NULL) {
 		ARC_DEBUG(ERR, "Invalid parameters (%p %d %p)\n", path, mode, ret);
 		return -1;
@@ -594,6 +597,13 @@ int vfs_link(char *file, char *link, uint32_t mode) {
 	return 0;
 }
 
+static int vfs_migrate_data(ARC_GraphNode *to_mount, ARC_GraphNode *data_node) {
+        (void)to_mount;
+        (void)data_node;
+        ARC_DEBUG(WARN, "Definitely migrating data\n");
+        return 0;
+}
+
 // TODO: Account for links - currently if a link is renamed such that
 //       the depth from the shared parent directory is changed it will break.
 //       Shall the kernel be nice and recalculate the path of a symlink or let
@@ -652,7 +662,16 @@ int vfs_rename(char *from, char *to) {
 	if (name[name_len - 1] == '/') {
 		name[name_len - 1] = 0;
 	}
-         
+
+        ARC_VFSGraphData *parent_data = (ARC_VFSGraphData *)&parent->arb;
+        ARC_VFSGraphData *node_data = (ARC_VFSGraphData *)&_from->arb;
+
+        if (parent_data->type != ARC_VFS_TYPE_MOUNT && parent_data->mount != node_data->mount) {
+                vfs_migrate_data(parent_data->mount, _from);
+        } else if (parent_data->type == ARC_VFS_TYPE_MOUNT && node_data->mount != parent) {
+                vfs_migrate_data(parent, _from);
+        }
+        
 	graph_add(parent, _from, name);
         
         ARC_ATOMIC_DEC(parent->ref_count); // B
