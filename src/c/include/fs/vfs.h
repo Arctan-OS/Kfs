@@ -58,7 +58,7 @@ size_t vfs_write(void *buffer, size_t size, size_t count, ARC_File *file);
 int vfs_seek(ARC_File *file, long offset, int whence);
 int vfs_close(ARC_File *file);
 int vfs_stat(char *path, struct stat *stat);
-int vfs_create(char *path, uint32_t mode);
+int vfs_create(char *path, uint32_t mode, ARC_Resource *with_res);
 int vfs_remove(char *path);
 int vfs_link(char *file, char *link, uint32_t mode);
 int vfs_rename(char *from, char *to);

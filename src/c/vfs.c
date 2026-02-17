@@ -78,6 +78,7 @@ static int vfs_mode2type(uint32_t mode) {
 }
 
 struct create_callback_args {
+        ARC_Resource *with_res;
 	uint32_t mode;
 	bool create;
         bool no_links;
@@ -163,11 +164,11 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 
 	node_data->type = type;
 	node_data->stat.st_mode = arg->mode;
-
+        
 	if (mount == NULL) {
-                node_data->resource = type == ARC_VFS_TYPE_FILE ?
-                                      init_resource(ARC_DRIGRP_FS_FILE, ARC_DRIDEF_FS_FILE_BUFFER, NULL)
-                                      : NULL;
+                node_data->resource = (type == ARC_VFS_TYPE_FILE ?
+                                       init_resource(ARC_DRIGRP_FS_FILE, ARC_DRIDEF_FS_FILE_BUFFER, NULL) :
+                                       arg->with_res);
 		return node;
 	}
 
@@ -362,6 +363,8 @@ int vfs_open(char *path, int flags, uint32_t mode, ARC_File **ret) {
 
 	file->node = node;
 
+        *ret = file;
+        
         // NOTE: Leave node->ref_count incremented from path_traverse for the open file descriptor
         
 	return 0;
@@ -377,6 +380,7 @@ size_t vfs_read(void *buffer, size_t size, size_t count, ARC_File *file) {
 	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
 	ARC_Resource *res = data->resource;
 
+        printf("res=%p\n", res);
         if (res == NULL) {
                 ARC_ATOMIC_DEC(node->ref_count); // A
                 return 0;
@@ -516,13 +520,13 @@ int vfs_stat(char *path, struct stat *stat) {
 	return r;
 }
 
-int vfs_create(char *path, uint32_t mode) {
+int vfs_create(char *path, uint32_t mode, ARC_Resource *with_res) {
 	if (path == NULL || mode == 0) {
 		return -1;
 	}
 
 	ARC_GraphNode *root = vfs_get_root(path);
-	struct create_callback_args args = { .create = true, .mode = mode };
+	struct create_callback_args args = { .create = true, .mode = mode, .with_res = with_res };
         ARC_GraphNode *node = path_traverse(root, path, vfs_create_callback, &args); // A
         
 	if (node == NULL) {
@@ -766,3 +770,4 @@ int vfs_check_perms(struct stat *stat, uint32_t requested) {
 
 	return (stat->st_mode ^ requested) & (requested & 07);
 }
+
