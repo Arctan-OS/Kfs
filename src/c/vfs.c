@@ -31,6 +31,7 @@
 #include "fs/vfs.h"
 #include "global.h"
 #include "lib/atomics.h"
+#include "lib/cache/base.h"
 #include "lib/graph/base.h"
 #include "lib/graph/path.h"
 #include "lib/spinlock.h"
@@ -166,9 +167,15 @@ static ARC_GraphNode *vfs_create_callback(ARC_GraphNode *parent, char *name, cha
 	node_data->stat.st_mode = arg->mode;
         
 	if (mount == NULL) {
-                node_data->resource = (type == ARC_VFS_TYPE_FILE ?
+                ARC_Resource *nres = (type == ARC_VFS_TYPE_FILE ?
                                        init_resource(ARC_DRIGRP_FS_FILE, ARC_DRIDEF_FS_FILE_BUFFER, NULL) :
                                        arg->with_res);
+                node_data->resource = nres;
+
+                if (nres != NULL) {
+                        nres->driver->stat(nres, NULL, &node_data->stat);
+                }
+                
 		return node;
 	}
 
@@ -380,7 +387,6 @@ size_t vfs_read(void *buffer, size_t size, size_t count, ARC_File *file) {
 	ARC_VFSGraphData *data = (ARC_VFSGraphData *)&node->arb;
 	ARC_Resource *res = data->resource;
 
-        printf("res=%p\n", res);
         if (res == NULL) {
                 ARC_ATOMIC_DEC(node->ref_count); // A
                 return 0;
@@ -428,7 +434,7 @@ size_t vfs_write(void *buffer, size_t size, size_t count, ARC_File *file) {
 
 	_file.node = node;
 
-        size_t ret = res->driver->read(buffer, size, count, file, res);
+        size_t ret = res->driver->write(buffer, size, count, file, res);
         
         ARC_ATOMIC_DEC(node->ref_count); // A
         
@@ -453,9 +459,9 @@ int vfs_seek(ARC_File *file, long offset, int whence) {
 
 	switch (whence) {
 		case SEEK_SET: {
-			if (0 <= offset && offset < size) {
+                        if (0 <= offset && offset < size) {
 				file->offset = offset;
-			}
+                        }
 
 			break;
 		}
@@ -479,7 +485,7 @@ int vfs_seek(ARC_File *file, long offset, int whence) {
 
         ARC_ATOMIC_DEC(node->ref_count); // A
         
-	return 0;
+	return offset;
 }
 
 int vfs_close(ARC_File *file) {
