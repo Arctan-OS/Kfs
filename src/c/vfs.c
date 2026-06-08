@@ -5,7 +5,7 @@
  *
  * @LICENSE
  * Arctan-OS/Kfs - Kernel Filesystem Implementation
- * Copyright (C) 2023-2025 awewsomegamer
+ * Copyright (C) 2023-2026 awewsomegamer
  *
  * This file is part of Arctan-OS/Kfs.
  *
